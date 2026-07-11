@@ -1,7 +1,31 @@
 #!/usr/bin/env bash
+# Prototype (pre-package) installer, moved verbatim from the repo root's
+# install.sh in M2 (docs/packaging-goal.md "M2 -- Debian packaging and
+# lifecycle") -- kept ONLY to recreate prototype on-disk state for the
+# prototype-migration test; the real install path is now the .deb plus
+# cloudberryos-setup. Do not "fix" its known defects (see
+# docs/packaging-goal.md "Known prototype defects that must NOT be
+# ported") -- that would defeat the point of this fixture.
+#
+# Two kinds of change were unavoidable when this moved under tests/fixtures/:
+#   1. PROJECT_DIR now resolves two directories up instead of one (this
+#      file's own new location), so it still finds the real repo's
+#      config/, tools/, and assets/ -- pure relocation bookkeeping, no
+#      behavior change.
+#   2. M1 (after this script was written) deleted tools/cloudberryos-apply.sh
+#      and de-templated tools/build.py so it no longer generates
+#      cloudberryos-browser(.desktop), cloudberryos-firewall-apply,
+#      cloudberryos-firewall.service, or cloudberryos-home.desktop (see
+#      that module's module docstring and docs/packaging-goal.md M1 task
+#      3). Those five artifacts are written directly below instead of
+#      being copied from a script/generator output that no longer exists.
+#      They still land at the exact same prototype paths with the same
+#      "cloudberryos" fingerprint the migration logic looks for --
+#      everything else in this script (account creation, install.env,
+#      squid, systemd enablement, GDM autologin) is untouched.
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONFIG="$PROJECT_DIR/config/resources.json"
 STUDENT=""
 STUDENT_USER=""
@@ -90,8 +114,25 @@ install -d "$PREFIX" "$PREFIX/config" "$PREFIX/tools" "$PREFIX/home" "$PREFIX/ge
 install -m 0644 "$CONFIG" "$PREFIX/config/resources.json"
 install -m 0755 "$PROJECT_DIR/tools/build.py" "$PREFIX/tools/build.py"
 install -m 0755 "$PROJECT_DIR/tools/polish_user.sh" "$PREFIX/tools/polish_user.sh"
-install -m 0755 "$PROJECT_DIR/tools/cloudberryos-apply.sh" "$PREFIX/tools/cloudberryos-apply.sh"
 install -m 0755 "$PROJECT_DIR/tools/cloudberryos-resource.py" "$PREFIX/tools/cloudberryos-resource.py"
+# tools/cloudberryos-apply.sh no longer exists post-M1 (see header comment
+# above) -- write an equivalent prototype-era apply script directly.
+cat > "$PREFIX/tools/cloudberryos-apply.sh" <<'EOF_APPLY'
+#!/usr/bin/env bash
+# Managed by CloudberryOS (prototype). Regenerates artifacts and re-pushes
+# the squid config; sources /etc/cloudberryos/install.env (prototype
+# defect: clobbers squid.conf wholesale on every run -- see
+# docs/packaging-goal.md "Known prototype defects" #4/#6 for context).
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/cloudberryos/install.env
+python3 "$PREFIX/tools/build.py" --config "$PREFIX/config/resources.json" --target "$PREFIX" ${STUDENT:+--student "$STUDENT"}
+install -m 0644 "$PREFIX/generated/allowed-domains.txt" /etc/cloudberryos/allowed-domains.txt
+install -m 0644 "$PREFIX/generated/squid-cloudberryos.conf" /etc/squid/squid.conf
+systemctl restart squid || true
+echo "CloudberryOS (prototype) applied."
+EOF_APPLY
+chmod 0755 "$PREFIX/tools/cloudberryos-apply.sh"
 install -d /usr/share/backgrounds
 install -m 0644 "$PROJECT_DIR/assets/cloudberryos-wallpaper-3840.png" "$PREFIX/assets/cloudberryos-wallpaper-3840.png"
 install -m 0644 "$PROJECT_DIR/assets/cloudberryos-home.css" "$PREFIX/assets/cloudberryos-home.css"
@@ -114,8 +155,35 @@ python3 "$PREFIX/tools/build.py" "${BUILD_ARGS[@]}"
 install -d /etc/cloudberryos
 install -m 0644 "$PREFIX/generated/allowed-domains.txt" /etc/cloudberryos/allowed-domains.txt
 install -m 0644 "$PREFIX/generated/squid-cloudberryos.conf" /etc/cloudberryos/squid-cloudberryos.conf
-install -m 0755 "$PREFIX/generated/cloudberryos-browser" /usr/local/bin/cloudberryos-browser
-install -m 0644 "$PREFIX/generated/cloudberryos-browser.desktop" /usr/share/applications/cloudberryos-browser.desktop
+# cloudberryos-browser: build.py no longer generates this (M1 de-templated
+# it into the static usr/bin/cloudberryos-browser); write an equivalent
+# prototype-era (self-spawned http.server, PID file never reaped --
+# defect #8) launcher directly instead.
+cat > /usr/local/bin/cloudberryos-browser <<'EOF_BROWSER'
+#!/usr/bin/env bash
+# Managed by CloudberryOS (prototype browser launcher).
+set -euo pipefail
+STATE_DIR="${HOME}/.cloudberryos"
+mkdir -p "$STATE_DIR"
+nohup python3 -m http.server 8765 --directory "$STATE_DIR" >/dev/null 2>&1 &
+echo $! > "$STATE_DIR/home-server.pid"
+if command -v firefox >/dev/null 2>&1; then
+  exec firefox --new-window "http://127.0.0.1:8765/home/index.html"
+fi
+EOF_BROWSER
+chmod 0755 /usr/local/bin/cloudberryos-browser
+
+cat > /usr/share/applications/cloudberryos-browser.desktop <<'EOF_DESKTOP'
+[Desktop Entry]
+Type=Application
+Name=CloudberryOS Browser
+Comment=Managed by CloudberryOS (prototype)
+Exec=cloudberryos-browser %u
+Icon=cloudberryos-browser
+Terminal=false
+Categories=Education;
+EOF_DESKTOP
+
 install -m 0755 "$PREFIX/tools/cloudberryos-apply.sh" /usr/local/sbin/cloudberryos-apply
 install -m 0755 "$PREFIX/tools/cloudberryos-resource.py" /usr/local/bin/cloudberryos-resource
 
@@ -150,8 +218,42 @@ if [[ "$INSTALL_STUDENT_LOCK" -eq 1 ]]; then
   fi
   install -m 0644 /etc/cloudberryos/squid-cloudberryos.conf /etc/squid/squid.conf
 
-  install -m 0755 "$PREFIX/generated/cloudberryos-firewall-apply" /usr/local/sbin/cloudberryos-firewall-apply
-  install -m 0644 "$PREFIX/generated/cloudberryos-firewall.service" /etc/systemd/system/cloudberryos-firewall.service
+  # cloudberryos-firewall-apply / .service: build.py no longer generates
+  # these either (M1 replaced them with the static nftables unit under
+  # usr/lib/systemd/system/, fixing defects #1 IPv4-only and #2 no
+  # ExecStop). Write an equivalent prototype-era iptables-only script and
+  # unit (still no ExecStop -- reproducing defect #2 on purpose) directly.
+  cat > /usr/local/sbin/cloudberryos-firewall-apply <<'EOF_FWAPPLY'
+#!/usr/bin/env bash
+# Managed by CloudberryOS (prototype firewall -- iptables, IPv4 only).
+set -euo pipefail
+STUDENT_USERS_FILE="/etc/cloudberryos/student-users"
+[[ -f "$STUDENT_USERS_FILE" ]] || exit 0
+while IFS= read -r user; do
+  [[ -z "$user" ]] && continue
+  uid="$(id -u "$user" 2>/dev/null)" || continue
+  iptables -C OUTPUT -m owner --uid-owner "$uid" -p tcp --dport 80 -j REJECT 2>/dev/null || \
+    iptables -A OUTPUT -m owner --uid-owner "$uid" -p tcp --dport 80 -j REJECT || true
+  iptables -C OUTPUT -m owner --uid-owner "$uid" -p tcp --dport 443 -j REJECT 2>/dev/null || \
+    iptables -A OUTPUT -m owner --uid-owner "$uid" -p tcp --dport 443 -j REJECT || true
+done < "$STUDENT_USERS_FILE"
+EOF_FWAPPLY
+  chmod 0755 /usr/local/sbin/cloudberryos-firewall-apply
+
+  cat > /etc/systemd/system/cloudberryos-firewall.service <<'EOF_FWUNIT'
+[Unit]
+Description=CloudberryOS per-student firewall (prototype)
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cloudberryos-firewall-apply
+
+[Install]
+WantedBy=multi-user.target
+EOF_FWUNIT
+
   printf '%s\n' "$STUDENT_USER" > /etc/cloudberryos/student-users
 
   systemctl daemon-reload
@@ -194,7 +296,17 @@ if [[ "$INSTALL_POLICIES" -eq 1 ]]; then
   install -m 0644 "$PREFIX/generated/chrome-policies.json" /etc/chromium/policies/managed/cloudberryos.json
 fi
 
-install -m 0644 "$PREFIX/generated/cloudberryos-home.desktop" /usr/share/applications/cloudberryos-home.desktop
+# cloudberryos-home.desktop: also no longer generated by build.py post-M1.
+cat > /usr/share/applications/cloudberryos-home.desktop <<'EOF_HOMEDESKTOP'
+[Desktop Entry]
+Type=Application
+Name=CloudberryOS
+Comment=Managed by CloudberryOS (prototype)
+Exec=cloudberryos-browser http://127.0.0.1:8765/home/index.html
+Icon=cloudberryos-browser
+Terminal=false
+Categories=Education;
+EOF_HOMEDESKTOP
 
 cat <<EOF
 CloudberryOS installed.

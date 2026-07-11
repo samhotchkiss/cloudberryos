@@ -1,0 +1,24 @@
+#!/bin/sh
+# See docs/packaging-goal.md "Maintainer scripts". Only `purge` removes
+# family state; a plain `remove` leaves /etc/cloudberryos in place (nothing
+# under /etc/cloudberryos is a conffile -- see the "Live catalog" Locked
+# Decision -- so dpkg itself will never remove it on its own). Squid
+# restoration belongs to `cloudberryos-setup --remove-student-config`, not
+# postrm; this only prints a reminder if that step was skipped. Never
+# touches /home and never deletes user accounts.
+set -e
+
+case "$1" in
+  purge)
+    rm -rf /etc/cloudberryos
+    rm -rf /var/lib/cloudberryos
+    if [ -e /etc/squid/squid.conf.cloudberryos.bak ]; then
+      echo "cloudberryos: /etc/squid/squid.conf.cloudberryos.bak still exists." >&2
+      echo "cloudberryos: run 'sudo cloudberryos-setup --remove-student-config USER' to restore squid.conf from it, or remove the backup manually." >&2
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0

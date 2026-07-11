@@ -21,19 +21,22 @@ for future packaging, but the default install keeps the parent account unlocked.
 On the target laptop:
 
 ```bash
-sudo ./install.sh --student "Noah"
+sudo apt install ./cloudberryos_0.1.0_all.deb
+sudo cloudberryos-setup
 ```
 
-For a locked student account while keeping the parent account unlocked:
+`cloudberryos-setup` with no flags runs an interactive wizard (child name,
+student username, login choices, app packs). Every wizard question also has a
+flag, for example:
 
 ```bash
-sudo ./install.sh --student "Noah" --student-user noah
+sudo cloudberryos-setup --child-name "Noah" --student-user noah
 ```
 
-For a young child device with no login password:
+For a young child device with no login password and automatic login:
 
 ```bash
-sudo ./install.sh --student "Noah" --student-user noah --no-student-password --autologin
+sudo cloudberryos-setup --child-name "Noah" --student-user noah --no-password --autologin
 ```
 
 Recommended creative/offline apps:
@@ -68,14 +71,8 @@ server is used because YouTube embeds need a normal web origin; direct
 
 ## Add A Resource
 
-Edit [config/resources.json](config/resources.json), then reinstall from the
-source checkout:
-
-```bash
-sudo ./install.sh --student "Noah"
-```
-
-On an installed laptop, parent/admin users can edit the installed catalog:
+Parent/admin users edit the installed catalog with `cloudberryos-resource`,
+then regenerate and re-apply artifacts with `cloudberryos-apply`:
 
 ```bash
 sudo cloudberryos-resource list
@@ -127,7 +124,7 @@ Generated allowlist:
 Cloudberry browser launcher:
 
 ```text
-/usr/local/bin/cloudberryos-browser
+/usr/bin/cloudberryos-browser
 ```
 
 Firewall service:
@@ -145,7 +142,7 @@ default student-user install.
 To intentionally install machine-wide policies:
 
 ```bash
-sudo ./install.sh --student "Noah" --install-policies
+sudo cloudberryos-setup --install-browser-policies
 ```
 
 Firefox policies are written to:
@@ -173,8 +170,17 @@ administrator access or boot media access. Use a non-admin child account.
 ## Uninstall
 
 ```bash
-sudo ./uninstall.sh
+sudo cloudberryos-setup --remove-student-config USER
+sudo apt purge cloudberryos
 ```
+
+The first step reverses the child-account polish (proxy environment,
+autostart, curated desktop entries, Firefox `user.js`, GNOME settings) and
+restores `/etc/squid/squid.conf`; it keeps the child's account and
+`Projects`/`CloudberryOS` folders. The second step removes the package itself
+and the family catalog/state under `/etc/cloudberryos`. A plain
+`sudo apt remove cloudberryos` (without `purge`) leaves `/etc/cloudberryos` in
+place.
 
 ## Roadmap
 

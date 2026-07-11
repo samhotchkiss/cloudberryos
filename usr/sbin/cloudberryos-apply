@@ -61,10 +61,27 @@ def die(message):
     raise SystemExit(1)
 
 
+def run_migrate_install_env():
+    """Internal hook used only by debian/postinst: fold a prototype
+    /etc/cloudberryos/install.env into profile.json (see
+    cloudberryos_common.migrate_install_env and docs/packaging-goal.md
+    "State file" / the postinst spec under "Maintainer scripts"). No-op
+    (exit 0) if install.env is absent, which is what keeps a fresh
+    `apt install` postinst-safe.
+    """
+    if common.migrate_install_env():
+        print("cloudberryos-apply --migrate-install-env: migrated a prototype install.env into profile.json")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Regenerate CloudberryOS artifacts and re-apply squid.")
     parser.add_argument("--migrate", action="store_true", help="Run the migrations runner and exit")
+    parser.add_argument("--migrate-install-env", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    if args.migrate_install_env:
+        return run_migrate_install_env()
 
     if args.migrate:
         return run_migrate()

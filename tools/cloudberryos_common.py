@@ -25,6 +25,7 @@ PROFILE_PATH = ETC_DIR / "profile.json"
 RESOURCES_PATH = ETC_DIR / "resources.json"
 ALLOWED_DOMAINS_PATH = ETC_DIR / "allowed-domains.txt"
 STUDENT_USERS_PATH = ETC_DIR / "student-users"
+INSTALL_ENV_PATH = ETC_DIR / "install.env"
 INSTALL_ENV_MIGRATED_PATH = ETC_DIR / "install.env.migrated"
 
 SQUID_CONF_PATH = Path("/etc/squid/squid.conf")
@@ -83,8 +84,15 @@ def find_assets_src():
 
 
 def find_apps_doc():
+    # NOT /usr/share/doc/cloudberryos/ -- this file is read at runtime (the
+    # wizard app-name gate, parse_apps_catalog() below), not just human
+    # documentation, and Debian's own Docker base images ship a dpkg
+    # path-exclude=/usr/share/doc/* rule (see /etc/dpkg/dpkg.cfg.d/excludes)
+    # that silently drops everything there except copyright/changelog.* on
+    # every dpkg-based install -- which would make this unreadable in
+    # exactly the containers docs/packaging-goal.md mandates for testing.
     return _first_existing([
-        Path("/usr/share/doc/cloudberryos/apps.md"),
+        Path("/usr/share/cloudberryos/apps.md"),
         find_repo_root() / "docs" / "apps.md",
     ])
 
@@ -215,6 +223,57 @@ def save_profile(profile):
     merged["schema_version"] = SCHEMA_VERSION
     write_json_atomic(PROFILE_PATH, merged, mode=0o644)
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Prototype install.env migration (docs/packaging-goal.md "State file" /
+# postinst spec under "Maintainer scripts"). Distinct from the M3
+# schema_version migrations runner (cloudberryos-apply --migrate) -- this
+# handles the one-time prototype-era install.env -> profile.json move, not
+# ascending NNN-*.py schema migrations.
+# ---------------------------------------------------------------------------
+
+def migrate_install_env():
+    """If a prototype /etc/cloudberryos/install.env exists, fold its
+    values into profile.json (never clobbering fields an existing
+    profile.json already has) and rename it to install.env.migrated.
+    cloudberryos-setup deletes the .migrated file after its first
+    successful run. Returns True if a migration was performed, False if
+    install.env was absent (a no-op fresh-install is always safe).
+
+    install.env is written by the prototype's install.sh using bash's
+    `printf '%q'` quoting, so the only robust way to read it back is to
+    source it with bash rather than hand-parse KEY=value lines.
+    """
+    if not INSTALL_ENV_PATH.exists():
+        return False
+
+    script = 'set -a; . "$1"; printf \'%s\\n\' "$STUDENT" "$STUDENT_USER" "$INSTALL_POLICIES"'
+    result = subprocess.run(
+        ["bash", "-c", script, "bash", str(INSTALL_ENV_PATH)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            f"cloudberryos: failed to parse {INSTALL_ENV_PATH}: {result.stderr.strip()}"
+        )
+
+    lines = result.stdout.splitlines()
+    student = lines[0] if len(lines) > 0 else ""
+    student_user = lines[1] if len(lines) > 1 else ""
+    install_policies = lines[2] if len(lines) > 2 else "0"
+
+    profile = dict(load_profile())
+    if student and not profile.get("child_name"):
+        profile["child_name"] = student
+    if student_user and not profile.get("student_user"):
+        profile["student_user"] = student_user
+    if install_policies == "1" and not profile.get("install_browser_policies"):
+        profile["install_browser_policies"] = True
+    save_profile(profile)
+
+    os.replace(INSTALL_ENV_PATH, INSTALL_ENV_MIGRATED_PATH)
+    return True
 
 
 # ---------------------------------------------------------------------------

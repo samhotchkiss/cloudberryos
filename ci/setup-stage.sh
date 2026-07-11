@@ -76,7 +76,7 @@ for icon in assets/icons/*.svg; do
   install -m 0644 "$icon" "/usr/share/icons/hicolor/scalable/apps/$(basename "$icon")"
 done
 
-install -m 0644 docs/apps.md /usr/share/doc/cloudberryos/apps.md
+install -m 0644 docs/apps.md /usr/share/cloudberryos/apps.md
 
 hash_tree() {
   local dir="$1"

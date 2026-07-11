@@ -26,7 +26,7 @@ A future full CloudberryOS image can still be built from the same pieces:
 
 V1 is the installable foundation.
 
-- Install with `sudo ./install.sh --student "Noah"`.
+- Install with `sudo apt install ./cloudberryos_0.1.0_all.deb` and `sudo cloudberryos-setup`.
 - Generate a local homepage from `config/resources.json`.
 - Show a Wikipedia search box.
 - Link only to curated resources like Khan Academy, Wikipedia, NASA, Smithsonian,
@@ -64,7 +64,7 @@ Some things should not be faked in V1.
 ## V2: Cloudberry App And Local Service
 
 V2 should replace the static homepage with a local Cloudberry service, probably
-served at `http://127.0.0.1:8737/`.
+served at `http://127.0.0.1:8766/`.
 
 Capabilities:
 

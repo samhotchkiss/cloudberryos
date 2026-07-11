@@ -1,0 +1,49 @@
+#!/bin/sh
+# See docs/packaging-goal.md "Maintainer scripts" and the "Update flow" /
+# "State file" / "Migrations" Locked Decisions. Fully non-interactive;
+# tolerates systemctl being unavailable (cloudberryos-apply and
+# cloudberryos_common auto-detect /run/systemd/system and defer service
+# operations rather than erroring).
+set -e
+
+case "$1" in
+  configure)
+    # 1. Fold a prototype install.env into profile.json and rename it
+    #    install.env.migrated (cloudberryos-setup deletes the .migrated
+    #    file after its first successful run). No-op if install.env is
+    #    absent -- this is what keeps a fresh `apt install` postinst-safe.
+    cloudberryos-apply --migrate-install-env
+
+    # 2. Schema migrations runner. Explicit no-op on a fresh install (no
+    #    profile.json/resources.json yet) or when there are no migrations
+    #    to run; the full ascending-NNN runner is an M3 task. This step
+    #    fails hard -- a broken migration must abort configure, never
+    #    leave configs half-applied.
+    cloudberryos-apply --migrate
+
+    # 3. Regenerate artifacts from an existing profile (e.g. after an
+    #    `apt upgrade`, or right after step 1 migrated a prototype
+    #    install). Warn and continue on failure -- a runtime apply problem
+    #    must never wedge apt; cloudberryos-apply's squid write is already
+    #    an idempotent no-op when the candidate content is unchanged.
+    if [ -e /etc/cloudberryos/profile.json ]; then
+      if ! cloudberryos-apply; then
+        echo "cloudberryos: cloudberryos-apply failed -- run 'sudo cloudberryos-apply' manually once the problem above is fixed." >&2
+      fi
+    fi
+
+    # 4. Prototype (/usr/local) cleanup is cloudberryos-setup's job, not a
+    #    maintainer script's (Debian Policy 9.1.2 bars maintainer scripts
+    #    from touching /usr/local) -- just point the admin at it.
+    for f in /usr/local/bin/cloudberryos-browser /usr/local/bin/cloudberryos-resource \
+             /usr/local/sbin/cloudberryos-apply /usr/local/sbin/cloudberryos-firewall-apply; do
+      if [ -e "$f" ]; then
+        echo "cloudberryos: found a prototype (pre-package) file at $f -- run 'sudo cloudberryos-setup' to finish migrating it." >&2
+      fi
+    done
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0

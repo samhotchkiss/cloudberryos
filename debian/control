@@ -1,0 +1,20 @@
+Source: cloudberryos
+Section: admin
+Priority: optional
+Maintainer: Sam <s@swh.me>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.7.4
+Rules-Requires-Root: no
+
+Package: cloudberryos
+Architecture: all
+Depends: ${misc:Depends}, python3 (>= 3.10), squid, nftables, adduser, sudo, libglib2.0-bin, dbus, xdg-utils
+Suggests: gcompris-qt, tuxpaint, tuxmath, tuxtype, kiwix, libreoffice-writer, gimp, shotwell, hydrogen, lmms, audacity, godot3
+Description: curated, filtered Ubuntu overlay for a child account
+ CloudberryOS turns a stock Ubuntu install into a curated computing
+ environment for a child: a local curated homepage, an allowlist proxy,
+ per-child nftables firewall rules, and GNOME desktop polish.
+ .
+ Run "sudo cloudberryos-setup" after installing to create or configure the
+ child account. Optional creative and educational app packs are offered by
+ the setup wizard rather than being pulled in automatically.

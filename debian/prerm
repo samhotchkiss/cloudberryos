@@ -1,0 +1,11 @@
+#!/bin/sh
+# See docs/packaging-goal.md "Maintainer scripts". No custom logic needed:
+# the dh_installsystemd autoscript injected below stops
+# cloudberryos-firewall.service and any active cloudberryos-home@*.service
+# instances before removal; the firewall unit's ExecStop actually deletes
+# the "table inet cloudberryos" nftables table (fixes prototype defect #2).
+set -e
+
+#DEBHELPER#
+
+exit 0

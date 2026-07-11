@@ -3,3 +3,19 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# dpkg-buildpackage intermediates (the built .deb itself goes to ../ during
+# a build, then dist/ inside a container per the M2 acceptance gate -- both
+# are ephemeral container filesystem, never committed)
+/dist/
+debian/.debhelper/
+debian/debhelper-build-stamp
+debian/files
+debian/*.substvars
+debian/*.debhelper.log
+debian/cloudberryos/
+debian/tmp/
+debian/cloudberryos.debhelper.log
+debian/cloudberryos.postinst.debhelper
+debian/cloudberryos.postrm.debhelper
+debian/cloudberryos.prerm.debhelper

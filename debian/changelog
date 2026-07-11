@@ -1,0 +1,8 @@
+cloudberryos (0.1.0) unstable; urgency=medium
+
+  * Initial release: cloudberryos-setup wizard, curated local homepage,
+    squid allowlist proxy, per-child nftables firewall (IPv4 + IPv6),
+    GNOME child-account polish, resource-catalog validator, and prototype
+    (pre-package) install migration.
+
+ -- Sam <s@swh.me>  Sat, 11 Jul 2026 15:38:41 -0600

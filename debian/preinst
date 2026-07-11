@@ -1,0 +1,24 @@
+#!/bin/sh
+# See docs/packaging-goal.md "Maintainer scripts".
+#
+# Prototype (pre-package) installs used /usr/share/cloudberryos/config/resources.json
+# as their live, parent-edited catalog (cloudberryos-resource.py's old
+# DEFAULT_CONFIG). dpkg is about to unpack this package's read-only starter
+# copy over that same path, which would silently discard a parent's edits.
+# Rescue it into /etc/cloudberryos/resources.json (the packaged live-catalog
+# location) *before* unpacking, but only if nothing is there yet -- never
+# clobber an already-migrated or already-edited /etc copy.
+set -e
+
+case "$1" in
+  install|upgrade)
+    if [ ! -e /etc/cloudberryos/resources.json ] && [ -e /usr/share/cloudberryos/config/resources.json ]; then
+      mkdir -p /etc/cloudberryos
+      cp -p /usr/share/cloudberryos/config/resources.json /etc/cloudberryos/resources.json
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+
+exit 0
