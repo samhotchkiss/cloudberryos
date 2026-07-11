@@ -13,6 +13,9 @@ script from touching another package's conffile) -- only cloudberryos-setup
 and cloudberryos-apply may write it.
 """
 import argparse
+import copy
+import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -35,24 +38,173 @@ def warn(message):
     print(f"cloudberryos-apply: warning: {message}", file=sys.stderr)
 
 
-def run_migrate():
-    """Minimal migrations runner. M1 ships no migration scripts (the full
-    runner semantics -- schema_version bump, atomic temp-file+rename,
-    abort-on-failure -- are an M3 task per Locked Decisions); this is the
-    "no migrations to run yet" no-op path, including the required
-    fresh-install (`neither profile.json nor resources.json exists`) case.
-    """
-    if not common.PROFILE_PATH.exists() and not common.RESOURCES_PATH.exists():
-        print("cloudberryos-apply --migrate: no state files present, nothing to migrate")
+# ---------------------------------------------------------------------------
+# Migrations runner (docs/packaging-goal.md Locked Decisions -- "Migrations").
+#
+# Migration-module contract: each file under the migrations directory is
+# named `NNN-description.py` where NNN is a zero-padded (or plain) integer.
+# It must define:
+#
+#   SCHEMA_VERSION = NNN          (int; must equal the filename's number --
+#                                  a mismatch is a hard runner error)
+#
+# and may define either or both of:
+#
+#   def upgrade_profile(d: dict) -> dict: ...
+#   def upgrade_resources(d: dict) -> dict: ...
+#
+# Each hook receives the *current in-memory* dict for that state file (the
+# on-disk file is never touched mid-chain) and returns the upgraded dict
+# (returning a mutated version of the same dict is fine). The runner sets
+# `schema_version` to NNN itself after a hook returns, so hooks do not need
+# to (and should not rely on) set it themselves. A hook must be safe to
+# have its net effect applied to an already-migrated file (idempotent) --
+# in practice this is automatic because the runner only invokes a
+# migration's hook for a file when that file's current schema_version is
+# below NNN, so a given step is never invoked twice for the same file.
+#
+# A migration that defines only ONE of the two hooks (e.g. a
+# resources-only catalog migration) simply has no effect on the other
+# state file: that file is neither transformed nor written, and its
+# schema_version does not advance for that step -- a later migration that
+# DOES define its hook is still compared against that file's true,
+# unmoved current schema_version. This is why, e.g., a resources-only
+# migration never changes profile.json at all (not even its
+# schema_version) -- profile.json stays byte-identical on disk.
+#
+# Runner semantics:
+#   - schema_version is an int in both profile.json and resources.json;
+#     missing (or non-int) means 0.
+#   - Discover /usr/share/cloudberryos/migrations/NNN-*.py, sorted
+#     ascending by NNN.
+#   - For each state file that exists on disk (profile.json ->
+#     upgrade_profile, resources.json -> upgrade_resources), run every
+#     migration with NNN > that file's current schema_version, ascending,
+#     against an in-memory copy only.
+#   - Only after EVERY targeted file's entire chain succeeds does the
+#     runner write anything, each via atomic temp-file + rename
+#     (common.write_json_atomic). If any migration raises, the whole
+#     runner aborts non-zero and NOTHING is written -- no file is left
+#     half-migrated, and files whose chains already succeeded before the
+#     failure are also left untouched (writes only happen after every
+#     chain across every file has completed).
+#   - Fresh install (neither profile.json nor resources.json exists) is an
+#     explicit no-op, exit 0 -- postinst runs --migrate on every configure
+#     including first install and must never fail because of this step.
+# ---------------------------------------------------------------------------
+
+_MIGRATION_FILENAME_RE = re.compile(r"^(\d+)-.+\.py$")
+
+
+def _discover_migrations(migrations_dir):
+    """Return [(nnn:int, path:Path), ...] sorted ascending by nnn."""
+    found = []
+    for path in migrations_dir.glob("*.py"):
+        match = _MIGRATION_FILENAME_RE.match(path.name)
+        if not match:
+            continue
+        found.append((int(match.group(1)), path))
+    found.sort(key=lambda pair: pair[0])
+    return found
+
+
+def _load_migration_module(nnn, path):
+    spec = importlib.util.spec_from_file_location(f"cb_migration_{nnn}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    declared = getattr(module, "SCHEMA_VERSION", None)
+    if declared != nnn:
+        raise RuntimeError(
+            f"{path.name}: SCHEMA_VERSION is {declared!r}, expected {nnn} "
+            "(must match the filename's leading number)"
+        )
+    return module
+
+
+def _schema_version_of(data):
+    """schema_version is an int; missing (or a non-int value) means 0."""
+    version = data.get("schema_version", 0)
+    if not isinstance(version, int) or isinstance(version, bool):
         return 0
-    migrations_dir = common._first_existing([
+    return version
+
+
+def default_migrations_dir():
+    return common._first_existing([
         Path("/usr/share/cloudberryos/migrations"),
         common.find_repo_root() / "migrations",
     ])
-    if migrations_dir is None or not any(migrations_dir.glob("[0-9][0-9][0-9]-*.py")):
+
+
+def run_migrate(migrations_dir=None, profile_path=None, resources_path=None):
+    """The full migrations runner. Parameters are overridable only for unit
+    testing -- production call sites (postinst via `--migrate`) always use
+    the defaults, which resolve to the real /etc/cloudberryos state files
+    and the packaged (or repo-checkout) migrations directory.
+    """
+    profile_path = Path(profile_path) if profile_path is not None else common.PROFILE_PATH
+    resources_path = Path(resources_path) if resources_path is not None else common.RESOURCES_PATH
+
+    if not profile_path.exists() and not resources_path.exists():
+        print("cloudberryos-apply --migrate: no state files present, nothing to migrate")
+        return 0
+
+    if migrations_dir is None:
+        migrations_dir = default_migrations_dir()
+    migration_files = _discover_migrations(migrations_dir) if migrations_dir else []
+    if not migration_files:
         print("cloudberryos-apply --migrate: no migrations to run")
         return 0
-    print("cloudberryos-apply --migrate: no migrations to run")
+
+    targets = [
+        (profile_path, "upgrade_profile"),
+        (resources_path, "upgrade_resources"),
+    ]
+
+    pending_writes = []  # [(path, dict), ...] -- nothing is written until every chain succeeds
+    for path, hook_name in targets:
+        if not path.exists():
+            continue
+        data = common.load_json(path, default=None)
+        if data is None:
+            continue
+        current_version = _schema_version_of(data)
+
+        working = copy.deepcopy(data)
+        touched = False
+        for nnn, mod_path in migration_files:
+            if nnn <= current_version:
+                continue
+            try:
+                module = _load_migration_module(nnn, mod_path)
+                hook = getattr(module, hook_name, None)
+                if hook is None:
+                    # This migration file has nothing to say about this
+                    # particular state file (e.g. a resources-only
+                    # migration next to profile.json) -- it neither
+                    # transforms it nor advances its schema_version. A
+                    # later migration that DOES define this file's hook is
+                    # still compared against the file's true, unmoved
+                    # current_version, so it applies normally.
+                    continue
+                working = hook(working)
+                if not isinstance(working, dict):
+                    raise TypeError(f"{hook_name} in {mod_path.name} must return a dict")
+                working["schema_version"] = nnn
+                touched = True
+            except Exception as exc:
+                die(f"migration {mod_path.name} failed while upgrading {path}: {exc}")
+        if touched:
+            pending_writes.append((path, working))
+
+    if not pending_writes:
+        print("cloudberryos-apply --migrate: all state files already at the latest schema_version")
+        return 0
+
+    for path, data in pending_writes:
+        common.write_json_atomic(path, data)
+    for path, data in pending_writes:
+        print(f"cloudberryos-apply --migrate: {path} migrated to schema_version {data['schema_version']}")
     return 0
 
 

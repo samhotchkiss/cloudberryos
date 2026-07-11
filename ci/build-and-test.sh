@@ -85,8 +85,12 @@ stage_package() {
 
 stage_upgrade() {
   echo "== stage: upgrade =="
-  echo "upgrade stage not implemented yet (M3)" >&2
-  exit 1
+  # M3 acceptance gate (docs/packaging-goal.md "M3 -- Upgrades and
+  # migrations"). Runs on the HOST (needs Docker): builds 0.1.0 from the
+  # real committed source plus throwaway 0.1.1/0.1.2 workspaces (never
+  # committed), then exercises direct upgrade, failing-migration recovery,
+  # and the local signed-repo upgrade, each in its own fresh container.
+  bash "$REPO_ROOT/ci/upgrade-stage.sh"
 }
 
 for stage in "${STAGES[@]}"; do

@@ -5,6 +5,7 @@ package (the latter's filename even has hyphens), so they are loaded
 directly by file path with importlib rather than imported normally.
 """
 import copy
+import importlib.machinery
 import importlib.util
 import sys
 from pathlib import Path
@@ -13,13 +14,19 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOLS_DIR = REPO_ROOT / "tools"
+SBIN_DIR = REPO_ROOT / "usr" / "sbin"
 
 
 def _load_module(module_name, file_path):
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    # Explicit SourceFileLoader: spec_from_file_location() alone returns
+    # None for extensionless files (e.g. usr/sbin/cloudberryos-apply, which
+    # ships without a .py suffix) because it can't infer a loader from the
+    # file extension.
+    loader = importlib.machinery.SourceFileLoader(module_name, str(file_path))
+    spec = importlib.util.spec_from_loader(module_name, loader)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    loader.exec_module(module)
     return module
 
 
@@ -31,6 +38,20 @@ def build_module():
 @pytest.fixture(scope="session")
 def resource_module():
     return _load_module("cb_resource", TOOLS_DIR / "cloudberryos-resource.py")
+
+
+@pytest.fixture(scope="session")
+def common_module():
+    return _load_module("cb_common", TOOLS_DIR / "cloudberryos_common.py")
+
+
+@pytest.fixture(scope="session")
+def apply_module():
+    # usr/sbin/cloudberryos-apply has no .py extension and, on import,
+    # inserts TOOLS_DIR onto sys.path and imports cloudberryos_common as
+    # `common` itself -- loading it here exercises the exact same code
+    # path a real invocation uses.
+    return _load_module("cb_apply", SBIN_DIR / "cloudberryos-apply")
 
 
 @pytest.fixture

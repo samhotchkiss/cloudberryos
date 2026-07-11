@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """CloudberryOS migration 001 -- initial schema_version baseline.
 
-This is an intentional no-op placeholder. The full migrations-runner
-semantics (ascending NNN-*.py execution above the current schema_version,
-atomic temp-file+rename per step, abort-on-failure) are an M3 task per
-docs/packaging-goal.md Locked Decisions ("Migrations"). `cloudberryos-apply
---migrate` (usr/sbin/cloudberryos-apply) does not yet execute migration
-files at all in 0.1.0 -- it only detects their presence and no-ops,
-including the required fresh-install ("neither profile.json nor
-resources.json exists") case. This file exists so the shipped
-/usr/share/cloudberryos/migrations/ directory is not empty and so M3 has a
-concrete "version 1 is the starting baseline" script to build the runner
-against.
+Migration-module contract (see usr/sbin/cloudberryos-apply's run_migrate
+docstring/comment block for the full runner semantics):
+
+    SCHEMA_VERSION = <N>            -- must equal this file's NNN- prefix
+
+    def upgrade_profile(d: dict) -> dict: ...      (optional)
+    def upgrade_resources(d: dict) -> dict: ...    (optional)
+
+The runner calls whichever hook(s) a migration file defines, once per
+state file (profile.json / resources.json), only when that file's current
+schema_version is below this file's SCHEMA_VERSION, ascending across all
+migration files. Hooks receive an in-memory dict and return the upgraded
+dict; the runner itself stamps schema_version = SCHEMA_VERSION afterwards.
+
+001 is an intentional no-op baseline: schema_version 1 is where every
+0.1.0 install starts (both profile.json and resources.json are written
+at schema_version 1 from the day they are created), so this migration
+defines neither hook -- there is nothing to transform.
 """
 
-
-def migrate(profile, resources):
-    """No-op: schema_version 1 is the baseline every 0.1.0 install starts
-    at. Returns (profile, resources) unchanged."""
-    return profile, resources
+SCHEMA_VERSION = 1
 
 
 if __name__ == "__main__":
