@@ -1,0 +1,13 @@
+[Unit]
+Description=CloudberryOS per-child nftables firewall
+After=network-pre.target
+Before=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/cloudberryos/cloudberryos-firewall-apply
+ExecStop=/usr/libexec/cloudberryos/cloudberryos-firewall-apply --teardown
+
+[Install]
+WantedBy=multi-user.target

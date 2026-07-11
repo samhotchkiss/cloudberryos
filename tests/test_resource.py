@@ -225,6 +225,152 @@ def test_cli_add_site_round_trip(tmp_path, sample_catalog):
     assert any(r["title"] == "CLI Site" for r in reloaded["resources"])
 
 
+# ---------------------------------------------------------------------------
+# M1: strict youtu.be host check (fixes the substring hostname bug: a
+# lookalike host like "notyoutu.be" must NOT be accepted as youtu.be).
+# ---------------------------------------------------------------------------
+
+def test_video_id_from_rejects_lookalike_host(resource_module):
+    with pytest.raises(SystemExit):
+        resource_module.video_id_from("https://notyoutu.be/dQw4w9WgXcQ")
+
+
+def test_video_id_from_accepts_real_youtu_be(resource_module):
+    assert resource_module.video_id_from("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+
+
+# ---------------------------------------------------------------------------
+# M1: cloudberryos-resource validate (see docs/packaging-goal.md M1 task 5)
+# ---------------------------------------------------------------------------
+
+def _valid_catalog():
+    return {
+        "resources": [
+            {
+                "title": "Wikipedia",
+                "url": "https://www.wikipedia.org/",
+                "category": "Look Up",
+                "summary": "x",
+                "allow_domains": ["wikipedia.org", "wikimedia.org"],
+                "search": {"action": "https://en.wikipedia.org/w/index.php"},
+            }
+        ],
+        "extra_allow_domains": ["ocsp.digicert.com"],
+        "youtube": {"videos": [{"title": "A Video", "youtube_id": "dQw4w9WgXcQ"}]},
+    }
+
+
+def test_validate_config_accepts_valid_catalog(resource_module):
+    assert resource_module.validate_config(_valid_catalog()) == []
+
+
+def test_validate_config_requires_resources_list(resource_module):
+    errors = resource_module.validate_config({"resources": "nope"})
+    assert any("resources" in e for e in errors)
+
+
+def test_validate_config_requires_nonempty_title(resource_module):
+    catalog = _valid_catalog()
+    catalog["resources"][0]["title"] = "  "
+    errors = resource_module.validate_config(catalog)
+    assert any("title" in e for e in errors)
+
+
+@pytest.mark.parametrize("bad_url", ["ftp://example.com/", "not-a-url", "https:///no-host", ""])
+def test_validate_config_rejects_bad_resource_url(resource_module, bad_url):
+    catalog = _valid_catalog()
+    catalog["resources"][0]["url"] = bad_url
+    errors = resource_module.validate_config(catalog)
+    assert any("url" in e for e in errors)
+
+
+def test_validate_config_requires_nonempty_category(resource_module):
+    catalog = _valid_catalog()
+    catalog["resources"][0]["category"] = ""
+    errors = resource_module.validate_config(catalog)
+    assert any("category" in e for e in errors)
+
+
+@pytest.mark.parametrize(
+    "bad_domain",
+    [
+        "https://example.com",   # scheme
+        "example.com:443",       # port
+        "example.com/path",      # path
+        "user@example.com",      # userinfo
+        "",
+        "-example.com",          # must start with alnum
+    ],
+)
+def test_validate_config_rejects_malformed_domains(resource_module, bad_domain):
+    catalog = _valid_catalog()
+    catalog["resources"][0]["allow_domains"] = [bad_domain]
+    errors = resource_module.validate_config(catalog)
+    assert any("allow_domains" in e for e in errors)
+
+
+def test_validate_config_accepts_wildcard_domain_after_normalization(resource_module):
+    catalog = _valid_catalog()
+    catalog["resources"][0]["allow_domains"] = ["*.Example.COM"]
+    assert resource_module.validate_config(catalog) == []
+
+
+def test_validate_config_rejects_bad_extra_allow_domain(resource_module):
+    catalog = _valid_catalog()
+    catalog["extra_allow_domains"] = ["https://bad.example/"]
+    errors = resource_module.validate_config(catalog)
+    assert any("extra_allow_domains" in e for e in errors)
+
+
+def test_validate_config_requires_video_title_and_id(resource_module):
+    catalog = _valid_catalog()
+    catalog["youtube"]["videos"] = [{"title": "", "youtube_id": "short"}]
+    errors = resource_module.validate_config(catalog)
+    assert any("title" in e for e in errors)
+    assert any("youtube_id" in e for e in errors)
+
+
+def test_validate_config_requires_valid_search_action(resource_module):
+    catalog = _valid_catalog()
+    catalog["resources"][0]["search"] = {"action": "not-a-url"}
+    errors = resource_module.validate_config(catalog)
+    assert any("search.action" in e for e in errors)
+
+
+def test_validate_config_tolerates_unknown_keys(resource_module):
+    catalog = _valid_catalog()
+    catalog["some_future_field"] = {"whatever": True}
+    catalog["resources"][0]["some_new_key"] = "ok"
+    assert resource_module.validate_config(catalog) == []
+
+
+def test_validate_command_cli_exits_nonzero_on_invalid_catalog(tmp_path):
+    bad = {"resources": [{"title": "", "url": "not-a-url"}]}
+    config_path = tmp_path / "resources.json"
+    config_path.write_text(json.dumps(bad), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(RESOURCE_SCRIPT), "--config", str(config_path), "validate"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "validation error" in result.stdout
+
+
+def test_validate_command_cli_exits_zero_on_valid_catalog(tmp_path, sample_catalog):
+    config_path = tmp_path / "resources.json"
+    config_path.write_text(json.dumps(sample_catalog), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(RESOURCE_SCRIPT), "--config", str(config_path), "validate"],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert "valid" in result.stdout
+
+
+def test_default_config_points_at_etc_cloudberryos(resource_module):
+    assert str(resource_module.DEFAULT_CONFIG) == "/etc/cloudberryos/resources.json"
+
+
 def test_cli_add_video_round_trip(tmp_path, sample_catalog):
     config_path = tmp_path / "resources.json"
     config_path.write_text(json.dumps(sample_catalog), encoding="utf-8")

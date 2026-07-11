@@ -1,0 +1,587 @@
+#!/usr/bin/env python3
+"""cloudberryos-setup -- wizard + non-interactive setup for CloudberryOS.
+
+Implements the interface documented in docs/packaging-goal.md under
+"cloudberryos-setup interface". Root-only. Every prompt has a flag; the
+interactive wizard is a thin wrapper over the same flag-resolution path.
+"""
+import argparse
+import getpass
+import os
+import pwd
+import shutil
+import sys
+from pathlib import Path
+
+_TOOLS_DIR_CANDIDATES = [
+    Path("/usr/share/cloudberryos/tools"),
+    # repo checkout: usr/bin/cloudberryos-setup -> usr/bin -> usr -> repo root
+    Path(__file__).resolve().parent.parent.parent / "tools",
+]
+for _candidate in _TOOLS_DIR_CANDIDATES:
+    if (_candidate / "cloudberryos_common.py").exists():
+        sys.path.insert(0, str(_candidate))
+        break
+else:
+    raise SystemExit("cloudberryos-setup: cannot locate cloudberryos_common.py")
+
+import cloudberryos_common as common  # noqa: E402
+
+
+PROTOTYPE_MARKERS = [
+    Path("/usr/local/bin/cloudberryos-browser"),
+    Path("/usr/local/sbin/cloudberryos-apply"),
+]
+PROTOTYPE_CLEANUP_TARGETS = [
+    Path("/usr/local/bin/cloudberryos-browser"),
+    Path("/usr/local/bin/cloudberryos-resource"),
+    Path("/usr/local/sbin/cloudberryos-apply"),
+    Path("/usr/local/sbin/cloudberryos-firewall-apply"),
+]
+PROTOTYPE_FIREWALL_UNIT = Path("/etc/systemd/system/cloudberryos-firewall.service")
+
+USERJS_MARKER = "// Managed by CloudberryOS"
+
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def require_root():
+    if os.geteuid() != 0:
+        eprint("cloudberryos-setup: must be run as root (use sudo).")
+        raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="cloudberryos-setup",
+        description="Configure or update a CloudberryOS child account.",
+    )
+    parser.add_argument("--child-name")
+    parser.add_argument("--student-user")
+    # Legacy flags (renamed, not preserved as aliases with identical
+    # behavior -- see docs/packaging-goal.md "Legacy mapping").
+    parser.add_argument("--student", help=argparse.SUPPRESS)
+    parser.add_argument("--no-student-password", action="store_true", help=argparse.SUPPRESS)
+
+    parser.add_argument("--no-password", action="store_true")
+    parser.add_argument("--keep-password", action="store_true")
+    parser.add_argument("--autologin", action="store_true")
+    parser.add_argument("--no-autologin", action="store_true")
+    parser.add_argument("--apps", metavar="recommended|none|LIST")
+    parser.add_argument("--offline-wikipedia", action="store_true")
+    parser.add_argument("--no-offline-wikipedia", action="store_true")
+    parser.add_argument("--admin-panel", choices=["local", "off"])
+    parser.add_argument("--install-browser-policies", action="store_true")
+    parser.add_argument("--import-catalog", action="store_true")
+    parser.add_argument("--no-import-catalog", action="store_true")
+    parser.add_argument("--non-interactive", action="store_true")
+    parser.add_argument("--no-desktop", action="store_true")
+    parser.add_argument("--remove-student-config", metavar="USER")
+    return parser
+
+
+def resolve_legacy_flags(args):
+    if args.student and not args.child_name:
+        args.child_name = args.student
+    if args.no_student_password:
+        args.no_password = True
+
+
+def find_conflicts(args):
+    conflicts = []
+    if args.no_password and args.keep_password:
+        conflicts.append("--no-password conflicts with --keep-password")
+    if args.autologin and args.no_autologin:
+        conflicts.append("--autologin conflicts with --no-autologin")
+    if args.offline_wikipedia and args.no_offline_wikipedia:
+        conflicts.append("--offline-wikipedia conflicts with --no-offline-wikipedia")
+    if args.import_catalog and args.no_import_catalog:
+        conflicts.append("--import-catalog conflicts with --no-import-catalog")
+    return conflicts
+
+
+# ---------------------------------------------------------------------------
+# Small interactive helpers (used only when stdin is a TTY and
+# --non-interactive was not given)
+# ---------------------------------------------------------------------------
+
+def prompt_text(question, default=None):
+    suffix = f" [{default}]" if default else ""
+    answer = input(f"{question}{suffix}: ").strip()
+    return answer or default
+
+
+def prompt_yes_no(question, default):
+    hint = "Y/n" if default else "y/N"
+    answer = input(f"{question} [{hint}]: ").strip().lower()
+    if not answer:
+        return default
+    return answer in ("y", "yes")
+
+
+# ---------------------------------------------------------------------------
+# Prototype-install migration (docs/packaging-goal.md "Migration from
+# prototype installs")
+# ---------------------------------------------------------------------------
+
+def migrate_prototype_install(warn, deferred):
+    detected = any(marker.exists() for marker in PROTOTYPE_MARKERS)
+    if not detected:
+        return False
+
+    for target in PROTOTYPE_CLEANUP_TARGETS:
+        if not target.exists():
+            continue
+        if common.looks_like_cloudberryos_artifact(target):
+            target.unlink()
+        else:
+            warn(f"leaving unrecognized file in place (not a CloudberryOS artifact): {target}")
+
+    if PROTOTYPE_FIREWALL_UNIT.exists():
+        if not deferred:
+            common.run(["systemctl", "disable", "--now", "cloudberryos-firewall.service"])
+        PROTOTYPE_FIREWALL_UNIT.unlink()
+        if not deferred:
+            common.run(["systemctl", "daemon-reload"])
+        else:
+            warn("systemd unavailable -- removed the prototype firewall unit file, but could not systemctl disable/daemon-reload it")
+
+    if common.SQUID_BAK_PATH.exists():
+        shutil.copy2(common.SQUID_BAK_PATH, common.SQUID_CONF_PATH)
+
+    print("cloudberryos-setup: migrated a prototype (pre-package) CloudberryOS install; family state under /etc/cloudberryos was preserved")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Student account
+# ---------------------------------------------------------------------------
+
+def ensure_student_account(student_user, interactive, warn):
+    exists = common.run(["id", student_user]).returncode == 0
+    if not exists:
+        result = common.run(["adduser", "--disabled-password", "--gecos", "", student_user])
+        if result.returncode != 0:
+            raise SystemExit(f"cloudberryos-setup: failed to create user '{student_user}': {result.stderr.strip()}")
+        print(f"cloudberryos-setup: created account '{student_user}'")
+        return
+
+    # Defect #9 fix: check for admin/sudo membership before treating an
+    # existing account as the restricted child account, and never
+    # auto-demote it.
+    groups = set(common.run(["id", "-nG", student_user]).stdout.split())
+    is_admin = bool(groups & {"sudo", "admin"})
+    sudoers = common.run(["sudo", "-l", "-U", student_user])
+    combined = (sudoers.stdout + sudoers.stderr).lower()
+    if sudoers.returncode == 0 and "not allowed to run sudo" not in combined:
+        is_admin = True
+
+    if not is_admin:
+        return
+
+    current_user = os.environ.get("SUDO_USER") or getpass.getuser()
+    if student_user == current_user:
+        raise SystemExit(
+            f"cloudberryos-setup: refusing to configure '{student_user}' as the restricted child "
+            "account -- that is the account currently running setup."
+        )
+
+    if not interactive:
+        raise SystemExit(
+            f"cloudberryos-setup: '{student_user}' is a member of sudo/admin. Refusing to apply "
+            "child network restrictions to an administrator account without explicit confirmation, "
+            "which --non-interactive (or a non-TTY stdin) cannot provide. Re-run interactively to "
+            "confirm, or choose a non-admin --student-user."
+        )
+
+    confirmed = prompt_yes_no(
+        f"'{student_user}' currently has sudo/admin access. Continuing will apply the CloudberryOS "
+        "firewall and proxy to this account, but will NOT remove its admin access automatically. Continue?",
+        False,
+    )
+    if not confirmed:
+        raise SystemExit("cloudberryos-setup: aborted at parent's request")
+    warn(f"'{student_user}' retains sudo/admin access -- CloudberryOS never auto-demotes an account")
+
+
+def apply_password_state(student_user, no_password, warn):
+    if not no_password:
+        return
+    result = common.run(["passwd", "-d", student_user])
+    if result.returncode != 0:
+        warn(f"failed to clear password for '{student_user}': {result.stderr.strip()}")
+
+
+def kill_stale_home_server(student_user, warn):
+    try:
+        home_dir = Path(pwd.getpwnam(student_user).pw_dir)
+    except KeyError:
+        return
+    pid_file = home_dir / ".cloudberryos" / "home-server.pid"
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        os.kill(pid, 15)
+    except (ValueError, ProcessLookupError, PermissionError, OSError) as exc:
+        warn(f"could not stop stale prototype homepage server (pid file {pid_file}): {exc}")
+    pid_file.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# --remove-student-config (the un-polish path; see docs/packaging-goal.md
+# "Uninstall")
+# ---------------------------------------------------------------------------
+
+def gsettings_reset(user, warn):
+    resets = [
+        ("org.gnome.system.proxy", "mode", "none"),
+        ("org.gnome.desktop.screensaver", "lock-enabled", "true"),
+        ("org.gnome.desktop.notifications", "show-banners", "true"),
+        ("org.gnome.desktop.sound", "event-sounds", "true"),
+    ]
+    for schema, key, value in resets:
+        common.run(["sudo", "-u", user, "dbus-run-session", "--", "gsettings", "set", schema, key, value])
+    for schema, key in (("org.gnome.desktop.session", "idle-delay"), ("org.gnome.shell", "favorite-apps")):
+        common.run(["sudo", "-u", user, "dbus-run-session", "--", "gsettings", "reset", schema, key])
+
+
+def remove_student_config(user):
+    warnings = []
+
+    def warn(message):
+        warnings.append(message)
+        eprint(f"cloudberryos-setup: warning: {message}")
+
+    try:
+        home_dir = Path(pwd.getpwnam(user).pw_dir)
+    except KeyError:
+        eprint(f"cloudberryos-setup: no such user: {user}")
+        return 1
+
+    profile = common.load_profile()
+    deferred = not common.systemd_available()
+
+    (home_dir / ".config" / "environment.d" / "cloudberryos-proxy.conf").unlink(missing_ok=True)
+    (home_dir / ".config" / "autostart" / "cloudberryos-browser.desktop").unlink(missing_ok=True)
+    (home_dir / ".config" / "autostart" / "update-notifier.desktop").unlink(missing_ok=True)
+
+    local_apps = home_dir / ".local" / "share" / "applications"
+    for name in (
+        "cloudberryos-projects.desktop",
+        "cloudberryos-request-shelf.desktop",
+        "cloudberryos-offline-wikipedia.desktop",
+    ):
+        (local_apps / name).unlink(missing_ok=True)
+
+    if local_apps.is_dir():
+        for entry in local_apps.iterdir():
+            if not entry.is_file():
+                continue
+            try:
+                text = entry.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if "Name=Hidden" in text and "NoDisplay=true" in text and "Hidden=true" in text:
+                entry.unlink()
+
+    userjs_dirs = [home_dir / ".cloudberryos" / "firefox-profile"]
+    for root in (
+        home_dir / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
+        home_dir / ".mozilla" / "firefox",
+    ):
+        if root.is_dir():
+            userjs_dirs.extend(p for p in root.iterdir() if p.is_dir())
+    for profile_dir in userjs_dirs:
+        userjs = profile_dir / "user.js"
+        if not userjs.exists():
+            continue
+        try:
+            head = userjs.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        if head.startswith(USERJS_MARKER):
+            userjs.unlink()
+
+    (home_dir / ".local" / "bin" / "cloudberryos-request-shelf").unlink(missing_ok=True)
+    (home_dir / ".tuxpaintrc").unlink(missing_ok=True)
+    shutil.rmtree(home_dir / ".cloudberryos", ignore_errors=True)
+
+    mimeapps = home_dir / ".config" / "mimeapps.list"
+    mimeapps_bak = home_dir / ".config" / "mimeapps.list.cloudberryos.bak"
+    if mimeapps_bak.exists():
+        shutil.move(str(mimeapps_bak), str(mimeapps))
+    elif mimeapps.exists():
+        mimeapps.unlink()
+
+    if common.gnome_shell_present():
+        gsettings_reset(user, warn)
+
+    if not deferred:
+        common.run(["systemctl", "disable", "--now", f"cloudberryos-home@{user}.service"])
+    else:
+        warn(f"systemd unavailable -- skipping disable of cloudberryos-home@{user}.service")
+
+    common.gdm_set_autologin(user, False, warn)
+
+    if profile.get("squid_managed") and common.SQUID_BAK_PATH.exists():
+        shutil.copy2(common.SQUID_BAK_PATH, common.SQUID_CONF_PATH)
+        if not deferred:
+            restart = common.run(["systemctl", "restart", "squid"])
+            if restart.returncode != 0:
+                warn(f"systemctl restart squid failed: {restart.stderr.strip()}")
+        else:
+            warn("systemd unavailable -- skipping systemctl restart squid")
+
+    print(f"cloudberryos-setup: removed CloudberryOS child configuration for '{user}'")
+    print("The child account and Projects/CloudberryOS folders were kept (not removed).")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Main setup flow
+# ---------------------------------------------------------------------------
+
+def resolve_bool(true_flag, false_flag, existing_profile, key, default):
+    if true_flag:
+        return True
+    if false_flag:
+        return False
+    if key in existing_profile:
+        return existing_profile[key]
+    return default
+
+
+def resolve_apps(args, existing_profile, interactive):
+    if args.apps is None and "apps" in existing_profile and existing_profile["apps"] is not None:
+        return list(existing_profile["apps"])
+
+    apps_arg = args.apps
+    if apps_arg is None:
+        if interactive:
+            apps_arg = prompt_text("Apps to install (recommended/none/comma-separated package list)", "recommended")
+        else:
+            eprint("cloudberryos-setup: --apps is required (recommended|none|LIST) -- no existing profile value")
+            raise SystemExit(2)
+
+    wizard_apps, recommended_apps = common.parse_apps_catalog()
+    if apps_arg == "recommended":
+        return list(recommended_apps)
+    if apps_arg == "none":
+        return []
+    requested = [pkg.strip() for pkg in apps_arg.split(",") if pkg.strip()]
+    unknown = [pkg for pkg in requested if pkg not in wizard_apps]
+    if unknown:
+        eprint("cloudberryos-setup: unknown app package name(s): " + ", ".join(unknown))
+        eprint("Valid names: " + ", ".join(sorted(wizard_apps)))
+        raise SystemExit(2)
+    return requested
+
+
+def print_offline_wikipedia_instructions():
+    print()
+    print("Offline Wikipedia (Kiwix) is not downloaded automatically.")
+    print("1. Install the 'kiwix' package if not already installed (part of --apps recommended).")
+    print("2. Download the Simple English Wikipedia 'maxi' ZIM (about 3.3 GB) from https://library.kiwix.org/")
+    print("3. Save it under the child's ~/Kiwix/ directory, keeping the")
+    print("   'wikipedia_en_simple_all_maxi_*.zim' filename pattern.")
+    try:
+        usage = shutil.disk_usage("/home")
+        free_gb = usage.free / (1024 ** 3)
+        print(f"Free space on /home: {free_gb:.1f} GB (offline Wikipedia needs about 3.3 GB).")
+    except OSError:
+        pass
+
+
+def install_apps(apps_list, warn):
+    if not apps_list:
+        return
+    cmd = ["apt-get", "install", "-y", "--no-install-recommends"] + apps_list
+    result = common.run(cmd, capture_output=False)
+    if result.returncode != 0:
+        warn(f"apt-get install failed for one or more of: {', '.join(apps_list)}")
+
+
+def run_setup(args):
+    warnings = []
+
+    def warn(message):
+        warnings.append(message)
+        eprint(f"cloudberryos-setup: warning: {message}")
+
+    interactive = sys.stdin.isatty() and not args.non_interactive
+    existing_profile = common.load_profile()
+    deferred = not common.systemd_available()
+
+    child_name = args.child_name or existing_profile.get("child_name")
+    if not child_name:
+        if interactive:
+            child_name = prompt_text("Child's name")
+        else:
+            eprint("cloudberryos-setup: --child-name is required -- no existing profile value, and stdin is not interactive")
+            return 2
+
+    student_user = args.student_user or existing_profile.get("student_user")
+    if not student_user:
+        if interactive:
+            student_user = prompt_text("Student (Linux) username")
+        else:
+            eprint("cloudberryos-setup: --student-user is required -- no existing profile value, and stdin is not interactive")
+            return 2
+
+    try:
+        apps_list = resolve_apps(args, existing_profile, interactive)
+    except SystemExit as exc:
+        return exc.code
+
+    no_password = resolve_bool(args.no_password, args.keep_password, existing_profile, "no_password", False)
+    autologin = resolve_bool(args.autologin, args.no_autologin, existing_profile, "autologin", False)
+    offline_wikipedia = resolve_bool(args.offline_wikipedia, args.no_offline_wikipedia, existing_profile, "offline_wikipedia", False)
+    import_catalog = True
+    if args.no_import_catalog:
+        import_catalog = False
+    elif args.import_catalog:
+        import_catalog = True
+    admin_panel = args.admin_panel or existing_profile.get("admin_panel") or "off"
+    install_browser_policies = args.install_browser_policies or bool(existing_profile.get("install_browser_policies", False))
+
+    no_desktop = args.no_desktop or (not common.gnome_shell_present()) or common.running_in_container()
+
+    # --- Prototype migration (first, so later steps see a clean slate) ---
+    migrate_prototype_install(warn, deferred)
+
+    # --- Student account ---
+    ensure_student_account(student_user, interactive, warn)
+    apply_password_state(student_user, no_password, warn)
+
+    # --- Resource catalog ---
+    catalog_path, _created = common.ensure_resources_catalog(import_catalog)
+    errors = common.validate_resources(catalog_path)
+    if errors:
+        eprint(f"cloudberryos-setup: {catalog_path} failed validation:")
+        for error in errors:
+            eprint(f"  - {error}")
+        return 1
+
+    # --- Build artifacts + assets ---
+    common.VAR_DIR.mkdir(parents=True, exist_ok=True)
+    artifacts = common.build_artifacts(catalog_path, common.VAR_DIR, child_name)
+    common.copy_assets(common.VAR_DIR)
+    common.ETC_DIR.mkdir(parents=True, exist_ok=True)
+    common.atomic_write(common.ALLOWED_DOMAINS_PATH, artifacts["allowed_domains"], mode=0o644)
+
+    # --- Squid (allowed-domains.txt above must exist before this) ---
+    common.apply_squid(artifacts["squid_conf"], deferred, warn)
+
+    # --- student-users (append-or-dedupe -- fixes defect #4) ---
+    common.merge_student_users(student_user)
+
+    # --- Browser policies (opt-in, off by default) ---
+    if install_browser_policies:
+        common.write_browser_policies(common.VAR_DIR)
+
+    # --- Polish the child home ---
+    polish_script = common._first_existing([
+        Path("/usr/share/cloudberryos/tools/polish_user.sh"),
+        common.find_repo_root() / "tools" / "polish_user.sh",
+    ])
+    if polish_script is None:
+        warn("polish_user.sh not found -- skipping child-home polish")
+    else:
+        polish_cmd = [
+            "bash", str(polish_script),
+            "--user", student_user,
+            "--student", child_name,
+            "--prefix", str(common.VAR_DIR),
+        ]
+        if no_desktop:
+            polish_cmd.append("--no-desktop")
+        result = common.run(polish_cmd, capture_output=False)
+        if result.returncode != 0:
+            warn(f"polish_user.sh exited {result.returncode}")
+
+    # --- GDM autologin (targeted edit -- fixes defect #5) ---
+    if no_desktop:
+        warn("--no-desktop (or no GNOME/container detected) -- skipping GDM autologin configuration")
+    else:
+        common.gdm_set_autologin(student_user, autologin, warn)
+
+    # --- App packs ---
+    install_apps(apps_list, warn)
+
+    # --- Service enablement (auto-degrades when systemd is not PID 1) ---
+    if deferred:
+        warn("systemd unavailable (/run/systemd/system absent) -- skipping enable of cloudberryos-firewall.service")
+        warn(f"systemd unavailable (/run/systemd/system absent) -- skipping enable of cloudberryos-home@{student_user}.service")
+    else:
+        common.run(["systemctl", "daemon-reload"])
+        kill_stale_home_server(student_user, warn)
+        firewall_unit = common._first_existing([
+            Path("/usr/lib/systemd/system/cloudberryos-firewall.service"),
+            common.find_repo_root() / "usr" / "lib" / "systemd" / "system" / "cloudberryos-firewall.service",
+        ])
+        if firewall_unit is not None:
+            result = common.run(["systemctl", "enable", "--now", "cloudberryos-firewall.service"])
+            if result.returncode != 0:
+                warn(f"systemctl enable --now cloudberryos-firewall.service failed: {result.stderr.strip()}")
+        result = common.run(["systemctl", "enable", "--now", f"cloudberryos-home@{student_user}.service"])
+        if result.returncode != 0:
+            warn(f"systemctl enable --now cloudberryos-home@{student_user}.service failed: {result.stderr.strip()}")
+
+    if offline_wikipedia:
+        print_offline_wikipedia_instructions()
+
+    # --- Persist profile (merge, never rewrite from scratch) ---
+    profile = {
+        "child_name": child_name,
+        "student_user": student_user,
+        "no_password": no_password,
+        "autologin": autologin,
+        "apps": apps_list,
+        "offline_wikipedia": offline_wikipedia,
+        "admin_panel": admin_panel,
+        "install_browser_policies": install_browser_policies,
+        "squid_managed": True,
+        "deferred_service_setup": deferred,
+    }
+    common.save_profile(profile)
+
+    if common.INSTALL_ENV_MIGRATED_PATH.exists():
+        common.INSTALL_ENV_MIGRATED_PATH.unlink()
+
+    print(f"cloudberryos-setup: done. Homepage: {common.HOMEPAGE_URL}")
+    if deferred:
+        print("cloudberryos-setup: service operations were deferred (no live systemd in this environment).")
+        print("Re-run cloudberryos-setup once systemd is available to complete them.")
+    return 0
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    resolve_legacy_flags(args)
+
+    conflicts = find_conflicts(args)
+    if conflicts:
+        eprint("cloudberryos-setup: conflicting flags:")
+        for conflict in conflicts:
+            eprint(f"  - {conflict}")
+        return 2
+
+    require_root()
+
+    if args.remove_student_config:
+        return remove_student_config(args.remove_student_config)
+
+    return run_setup(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

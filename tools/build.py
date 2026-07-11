@@ -79,8 +79,14 @@ def chrome_patterns_for_domain(domain):
     return [domain]
 
 
-def homepage_url(target):
-    return pathlib.Path(target, "home", "index.html").resolve().as_uri()
+CANONICAL_HOMEPAGE_URL = "http://127.0.0.1:8765/home/index.html"
+
+
+def homepage_url(target=None):
+    # Canonical URL everywhere (fixes defect #10: three artifacts disagreeing
+    # on the homepage URL). `target` is accepted for backward-compat call
+    # sites but no longer affects the result -- there is no file:// URI.
+    return CANONICAL_HOMEPAGE_URL
 
 
 def squid_domain_lines(config):
@@ -93,9 +99,12 @@ def squid_domain_lines(config):
     return [f".{domain}" for domain in uniq(minimal)]
 
 
-def build_firefox_policy(config, target):
+def build_firefox_policy(config):
+    # Firefox WebExtension match patterns cannot express a port number, so
+    # the homepage loopback exception below is intentionally port-less; it
+    # still matches http://127.0.0.1:8765/... because match patterns ignore
+    # port unless one is specified.
     exceptions = [
-        f"{pathlib.Path(target, 'home').resolve().as_uri()}/*",
         "http://127.0.0.1/*",
         "http://localhost/*",
     ]
@@ -111,7 +120,7 @@ def build_firefox_policy(config, target):
     return {
         "policies": {
             "Homepage": {
-                "URL": homepage_url(target),
+                "URL": homepage_url(),
                 "Locked": True,
                 "StartPage": "homepage-locked",
             },
@@ -156,13 +165,14 @@ def build_firefox_policy(config, target):
     }
 
 
-def build_chrome_policy(config, target):
+def build_chrome_policy(config):
     allowlist = [
         "about:*",
         "blob:*",
         "data:*",
-        f"{pathlib.Path(target, 'home').resolve().as_uri()}/*",
-        "http://127.0.0.1/*",
+        # Chrome allowlist entries can express a port, unlike Firefox match
+        # patterns, so narrow the loopback entry to the actual homepage port.
+        "http://127.0.0.1:8765/*",
         "http://localhost/*",
     ]
     for domain in collect_domains(config):
@@ -177,10 +187,10 @@ def build_chrome_policy(config, target):
     return {
         "URLBlocklist": ["*"],
         "URLAllowlist": allowlist,
-        "HomepageLocation": homepage_url(target),
+        "HomepageLocation": homepage_url(),
         "HomepageIsNewTabPage": False,
         "RestoreOnStartup": 4,
-        "RestoreOnStartupURLs": [homepage_url(target)],
+        "RestoreOnStartupURLs": [homepage_url()],
         "IncognitoModeAvailability": 1,
         "BrowserGuestModeEnabled": False,
         "DefaultSearchProviderEnabled": False,
@@ -819,164 +829,6 @@ def write_text(path, text):
         handle.write(text)
 
 
-def build_desktop_file(target):
-    home = homepage_url(target)
-    return f"""[Desktop Entry]
-Type=Application
-Name=CloudberryOS
-Comment=Open the curated kids homepage
-Exec=firefox {home}
-Icon=cloudberryos-browser
-Terminal=false
-Categories=Education;
-"""
-
-
-def build_browser_desktop_file():
-    return """[Desktop Entry]
-Type=Application
-Name=CloudberryOS Browser
-Comment=Open the curated CloudberryOS browser
-Exec=cloudberryos-browser %u
-Icon=cloudberryos-browser
-Terminal=false
-Categories=Education;
-StartupNotify=true
-MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;
-"""
-
-
-def build_browser_launcher(target):
-    system_site_dir = pathlib.Path(target).resolve()
-    return f"""#!/usr/bin/env bash
-set -euo pipefail
-
-SYSTEM_SITE_DIR="{system_site_dir}"
-USER_HOME_FILE="${{HOME}}/CloudberryOS/site/home/index.html"
-if [[ -f "$USER_HOME_FILE" ]]; then
-  SITE_DIR="${{HOME}}/CloudberryOS/site"
-else
-  SITE_DIR="$SYSTEM_SITE_DIR"
-fi
-HOME_PORT="${{CLOUDBERRYOS_HOME_PORT:-8765}}"
-HOME_URL="http://127.0.0.1:${{HOME_PORT}}/home/index.html"
-TARGET_URL="${{1:-$HOME_URL}}"
-STATE_DIR="${{HOME}}/.cloudberryos"
-LOG_FILE="$STATE_DIR/browser.log"
-mkdir -p "$STATE_DIR"
-
-log() {{
-  printf '[%s] %s\\n' "$(date --iso-8601=seconds)" "$*" >> "$LOG_FILE"
-}}
-
-start_home_server() {{
-  if [[ ! -d "$SITE_DIR" ]]; then
-    log "CloudberryOS site directory not found: $SITE_DIR"
-    return 1
-  fi
-
-  if command -v python3 >/dev/null 2>&1; then
-    if python3 - "$HOME_URL" >/dev/null 2>&1 <<'PY'
-import sys
-import urllib.request
-
-try:
-    with urllib.request.urlopen(sys.argv[1], timeout=1.5) as response:
-        raise SystemExit(0 if response.status < 500 else 1)
-except Exception:
-    raise SystemExit(1)
-PY
-    then
-      return 0
-    fi
-
-    log "Starting CloudberryOS local homepage server on 127.0.0.1:$HOME_PORT from $SITE_DIR"
-    (
-      cd "$SITE_DIR"
-      nohup python3 -m http.server "$HOME_PORT" --bind 127.0.0.1 >> "$LOG_FILE" 2>&1 &
-      printf '%s\\n' "$!" > "$STATE_DIR/home-server.pid"
-    )
-
-    for _ in 1 2 3 4 5; do
-      sleep 0.4
-      if python3 - "$HOME_URL" >/dev/null 2>&1 <<'PY'
-import sys
-import urllib.request
-
-try:
-    with urllib.request.urlopen(sys.argv[1], timeout=1.5) as response:
-        raise SystemExit(0 if response.status < 500 else 1)
-except Exception:
-    raise SystemExit(1)
-PY
-      then
-        return 0
-      fi
-    done
-  fi
-
-  log "CloudberryOS local homepage server did not start"
-  return 1
-}}
-
-write_userjs() {{
-  local profile_dir="$1"
-  [[ -d "$profile_dir" ]] || return 0
-  cat > "$profile_dir/user.js" <<EOF
-user_pref("browser.startup.homepage", "$HOME_URL");
-user_pref("browser.startup.page", 1);
-user_pref("browser.newtabpage.enabled", false);
-user_pref("browser.shell.checkDefaultBrowser", false);
-user_pref("browser.sessionstore.resume_from_crash", false);
-user_pref("browser.sessionstore.max_tabs_undo", 0);
-user_pref("browser.sessionstore.max_windows_undo", 0);
-user_pref("browser.urlbar.suggest.searches", false);
-user_pref("browser.urlbar.suggest.quicksuggest.sponsored", false);
-user_pref("extensions.getAddons.showPane", false);
-user_pref("extensions.htmlaboutaddons.recommendations.enabled", false);
-user_pref("network.proxy.type", 1);
-user_pref("network.proxy.http", "127.0.0.1");
-user_pref("network.proxy.http_port", 3128);
-user_pref("network.proxy.ssl", "127.0.0.1");
-user_pref("network.proxy.ssl_port", 3128);
-user_pref("network.proxy.no_proxies_on", "localhost, 127.0.0.1");
-user_pref("signon.rememberSignons", false);
-EOF
-}}
-
-write_userjs "$STATE_DIR/firefox-profile"
-for profile_root in "$HOME/snap/firefox/common/.mozilla/firefox" "$HOME/.mozilla/firefox"; do
-  [[ -d "$profile_root" ]] || continue
-  while IFS= read -r profile_dir; do
-    [[ -f "$profile_dir/prefs.js" || -f "$profile_dir/times.json" ]] || continue
-    write_userjs "$profile_dir"
-    rm -f "$profile_dir/sessionstore.jsonlz4" "$profile_dir/sessionstore-backups"/*.jsonlz4 2>/dev/null || true
-  done < <(find "$profile_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
-done
-
-if command -v firefox >/dev/null 2>&1; then
-  FIREFOX_BIN="$(command -v firefox)"
-elif [[ -x /snap/bin/firefox ]]; then
-  FIREFOX_BIN="/snap/bin/firefox"
-else
-  log "Firefox executable not found"
-  exit 127
-fi
-
-export http_proxy="http://127.0.0.1:3128"
-export https_proxy="http://127.0.0.1:3128"
-export HTTP_PROXY="$http_proxy"
-export HTTPS_PROXY="$https_proxy"
-export no_proxy="localhost,127.0.0.1,::1"
-export NO_PROXY="$no_proxy"
-export MOZ_ENABLE_WAYLAND=1
-
-start_home_server || true
-log "Launching $FIREFOX_BIN --new-window $TARGET_URL"
-nohup "$FIREFOX_BIN" --new-window "$TARGET_URL" >> "$LOG_FILE" 2>&1 &
-"""
-
-
 def build_squid_config():
     return """# Managed by CloudberryOS.
 http_port 127.0.0.1:3128
@@ -998,55 +850,6 @@ access_log stdio:/var/log/squid/cloudberryos-access.log
 """
 
 
-def build_firewall_script():
-    return """#!/usr/bin/env bash
-set -euo pipefail
-
-CHAIN="CLOUDBERRYOS_OUT"
-USERS_FILE="/etc/cloudberryos/student-users"
-
-while rule="$(iptables -w -S OUTPUT | grep -- "-j $CHAIN" | head -n 1)"; [[ -n "$rule" ]]; do
-  read -r -a parts <<< "$rule"
-  parts[0]="-D"
-  iptables -w "${parts[@]}"
-done
-iptables -w -F "$CHAIN" 2>/dev/null || true
-iptables -w -X "$CHAIN" 2>/dev/null || true
-iptables -w -N "$CHAIN"
-
-iptables -w -A "$CHAIN" -o lo -j RETURN
-iptables -w -A "$CHAIN" -p udp --dport 443 -j REJECT
-iptables -w -A "$CHAIN" -p tcp -m multiport --dports 80,443 -j REJECT
-iptables -w -A "$CHAIN" -j RETURN
-
-if [[ -f "$USERS_FILE" ]]; then
-  while IFS= read -r user; do
-    [[ -z "$user" ]] && continue
-    if id "$user" >/dev/null 2>&1; then
-      uid="$(id -u "$user")"
-      iptables -w -A OUTPUT -m owner --uid-owner "$uid" -j "$CHAIN"
-    fi
-  done < "$USERS_FILE"
-fi
-"""
-
-
-def build_firewall_service():
-    return """[Unit]
-Description=Apply CloudberryOS student web egress rules
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/cloudberryos-firewall-apply
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-"""
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
@@ -1059,15 +862,10 @@ def main():
     student = args.student or config.get("default_student", "Explorer")
 
     write_text(target / "home" / "index.html", render_home(config, target, student))
-    write_json(target / "generated" / "firefox-policies.json", build_firefox_policy(config, target))
-    write_json(target / "generated" / "chrome-policies.json", build_chrome_policy(config, target))
+    write_json(target / "generated" / "firefox-policies.json", build_firefox_policy(config))
+    write_json(target / "generated" / "chrome-policies.json", build_chrome_policy(config))
     write_text(target / "generated" / "allowed-domains.txt", "\n".join(squid_domain_lines(config)) + "\n")
     write_text(target / "generated" / "squid-cloudberryos.conf", build_squid_config())
-    write_text(target / "generated" / "cloudberryos-browser", build_browser_launcher(target))
-    write_text(target / "generated" / "cloudberryos-browser.desktop", build_browser_desktop_file())
-    write_text(target / "generated" / "cloudberryos-firewall-apply", build_firewall_script())
-    write_text(target / "generated" / "cloudberryos-firewall.service", build_firewall_service())
-    write_text(target / "generated" / "cloudberryos-home.desktop", build_desktop_file(target))
 
 
 if __name__ == "__main__":

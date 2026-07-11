@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=CloudberryOS
+Comment=Open the curated kids homepage
+Exec=cloudberryos-browser http://127.0.0.1:8765/home/index.html
+Icon=cloudberryos-browser
+Terminal=false
+Categories=Education;

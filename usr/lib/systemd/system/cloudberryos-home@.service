@@ -1,0 +1,15 @@
+[Unit]
+Description=CloudberryOS curated homepage server for %i
+ConditionPathExists=/home/%i/CloudberryOS/site
+
+[Service]
+# User=%i is mandatory: python3 -m http.server follows symlinks, and a
+# root-run server over a child-writable docroot is an arbitrary-file-read-
+# as-root primitive. Never run this unit as root.
+User=%i
+WorkingDirectory=/home/%i/CloudberryOS/site
+ExecStart=/usr/bin/python3 -m http.server 8765 --bind 127.0.0.1
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

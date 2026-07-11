@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=CloudberryOS Browser
+Comment=Open the curated CloudberryOS browser
+Exec=cloudberryos-browser %u
+Icon=cloudberryos-browser
+Terminal=false
+Categories=Education;
+StartupNotify=true
+MimeType=text/html;x-scheme-handler/http;x-scheme-handler/https;

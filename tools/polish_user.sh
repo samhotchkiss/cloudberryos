@@ -1,15 +1,35 @@
 #!/usr/bin/env bash
+# Applies CloudberryOS child-account "polish": project folders, curated
+# desktop entries, autostart, mimeapps defaults, proxy environment, Firefox
+# user.js, hidden-app overrides, and GNOME gsettings. Stays a bash script in
+# 0.1.0 (not ported to Python; see docs/packaging-goal.md Current State).
+#
+# M1 fixes (see docs/packaging-goal.md "Known prototype defects"):
+#   #7  per-child desktop entries (Projects, Ask for a Shelf, Offline
+#       Wikipedia) now go to ~/.local/share/applications/, never
+#       /usr/share/applications (which baked one child's home path into a
+#       machine-wide file); Offline Wikipedia is now keyed off the literal
+#       glob wikipedia_en_simple_all_maxi_*.zim (newest match wins), not a
+#       hardcoded dated filename.
+#   --   the dead ~/.cloudberryos/site copy is dropped (CloudberryOS/site is
+#       the one and only on-disk copy; the homepage is served over loopback
+#       by cloudberryos-home@.service, never opened as a local copy).
+#   #10  Firefox user.js points at the canonical
+#       http://127.0.0.1:8765/home/index.html, never a file:// URI.
 set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: polish_user.sh --user USER --student NAME --prefix PREFIX
+Usage: polish_user.sh --user USER --student NAME --prefix PREFIX [--no-desktop]
 USAGE
 }
 
 STUDENT_USER=""
 STUDENT=""
-PREFIX="/usr/share/cloudberryos"
+PREFIX="/var/lib/cloudberryos"
+NO_DESKTOP=0
+HOME_URL="http://127.0.0.1:8765/home/index.html"
+USERJS_MARKER="// Managed by CloudberryOS -- edits here are overwritten by cloudberryos-apply."
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -24,6 +44,10 @@ while [[ $# -gt 0 ]]; do
     --prefix)
       PREFIX="${2:?Missing value for --prefix}"
       shift 2
+      ;;
+    --no-desktop)
+      NO_DESKTOP=1
+      shift
       ;;
     -h|--help)
       usage
@@ -58,7 +82,6 @@ install -d -o "$STUDENT_USER" -g "$STUDENT_USER" \
   "$HOME_DIR/.local/bin" \
   "$HOME_DIR/.config/autostart" \
   "$HOME_DIR/.config/environment.d" \
-  "$HOME_DIR/.cloudberryos/site" \
   "$HOME_DIR/CloudberryOS/site" \
   "$HOME_DIR/${STUDENT}'s Projects/Stories" \
   "$HOME_DIR/${STUDENT}'s Projects/Drawings" \
@@ -69,24 +92,22 @@ install -d -o "$STUDENT_USER" -g "$STUDENT_USER" \
 
 chown -R "$STUDENT_USER:$STUDENT_USER" \
   "$HOME_DIR/.local" \
-  "$HOME_DIR/.cloudberryos" \
   "$HOME_DIR/CloudberryOS" \
   "$HOME_DIR/${STUDENT}'s Projects"
 chown "$STUDENT_USER:$STUDENT_USER" "$HOME_DIR/.config"
 
+# The one and only on-disk site copy the homepage server (User=%i,
+# WorkingDirectory=/home/%i/CloudberryOS/site) actually serves from. There
+# is no second copy under ~/.cloudberryos/site (that duplicate was dead:
+# nothing ever read it).
 if [[ -d "$PREFIX/home" ]]; then
-  rm -rf "$HOME_DIR/.cloudberryos/site/home"
-  cp -a "$PREFIX/home" "$HOME_DIR/.cloudberryos/site/home"
   rm -rf "$HOME_DIR/CloudberryOS/site/home"
   cp -a "$PREFIX/home" "$HOME_DIR/CloudberryOS/site/home"
 fi
 if [[ -d "$PREFIX/assets" ]]; then
-  rm -rf "$HOME_DIR/.cloudberryos/site/assets"
-  cp -a "$PREFIX/assets" "$HOME_DIR/.cloudberryos/site/assets"
   rm -rf "$HOME_DIR/CloudberryOS/site/assets"
   cp -a "$PREFIX/assets" "$HOME_DIR/CloudberryOS/site/assets"
 fi
-chown -R "$STUDENT_USER:$STUDENT_USER" "$HOME_DIR/.cloudberryos/site"
 chown -R "$STUDENT_USER:$STUDENT_USER" "$HOME_DIR/CloudberryOS/site"
 
 cat > "$HOME_DIR/${STUDENT}'s Projects/Start Here.txt" <<EOF
@@ -137,8 +158,13 @@ EOF
 chown "$STUDENT_USER:$STUDENT_USER" "$HOME_DIR/.local/bin/cloudberryos-request-shelf"
 chmod 0755 "$HOME_DIR/.local/bin/cloudberryos-request-shelf"
 
+# Per-child desktop entries: fix #7. These bake this child's home path, so
+# they must live per-user (~/.local/share/applications), never machine-wide
+# under /usr/share/applications.
 PROJECTS_DIR="${HOME_DIR}/${STUDENT}'s Projects"
-cat > /usr/share/applications/cloudberryos-projects.desktop <<EOF
+LOCAL_APPS_DIR="$HOME_DIR/.local/share/applications"
+
+cat > "$LOCAL_APPS_DIR/cloudberryos-projects.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=${STUDENT}'s Projects
@@ -149,7 +175,7 @@ Terminal=false
 Categories=Education;
 EOF
 
-cat > /usr/share/applications/cloudberryos-request-shelf.desktop <<EOF
+cat > "$LOCAL_APPS_DIR/cloudberryos-request-shelf.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Ask for a Shelf
@@ -173,9 +199,15 @@ NoDisplay=true
 EOF
 chown "$STUDENT_USER:$STUDENT_USER" "$HOME_DIR/.config/autostart/update-notifier.desktop"
 
-MAXI_ZIM="$HOME_DIR/Kiwix/wikipedia_en_simple_all_maxi_2026-05.zim"
-if [[ -f "$MAXI_ZIM" ]]; then
-  cat > /usr/share/applications/cloudberryos-offline-wikipedia.desktop <<EOF
+# Offline Wikipedia detection: fix #7. Upstream Kiwix renames/prunes dated
+# archive files, so key off the literal glob (underscores literal, newest
+# match wins) instead of a hardcoded dated filename.
+MAXI_ZIM=""
+if [[ -d "$HOME_DIR/Kiwix" ]]; then
+  MAXI_ZIM="$(find "$HOME_DIR/Kiwix" -maxdepth 1 -type f -name 'wikipedia_en_simple_all_maxi_*.zim' 2>/dev/null | sort | tail -n 1)"
+fi
+if [[ -n "$MAXI_ZIM" && -f "$MAXI_ZIM" ]]; then
+  cat > "$LOCAL_APPS_DIR/cloudberryos-offline-wikipedia.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Offline Wikipedia
@@ -185,7 +217,10 @@ Icon=cloudberryos-offline-wikipedia
 Terminal=false
 Categories=Education;
 EOF
+else
+  rm -f "$LOCAL_APPS_DIR/cloudberryos-offline-wikipedia.desktop"
 fi
+chown "$STUDENT_USER:$STUDENT_USER" "$LOCAL_APPS_DIR"/cloudberryos-*.desktop 2>/dev/null || true
 
 rm -f "$HOME_DIR/Desktop"/cloudberryos-*.desktop
 
@@ -227,35 +262,49 @@ for app in "${hide_apps[@]}"; do
   fi
 done
 
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.background picture-uri "file:///usr/share/backgrounds/cloudberryos.png" || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.background picture-uri-dark "file:///usr/share/backgrounds/cloudberryos.png" || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.interface color-scheme "prefer-dark" || true
-favorites="['cloudberryos-browser.desktop', 'cloudberryos-projects.desktop', 'cloudberryos-request-shelf.desktop'"
-if [[ -f /usr/share/applications/cloudberryos-offline-wikipedia.desktop ]]; then
-  favorites="${favorites}, 'cloudberryos-offline-wikipedia.desktop'"
+if [[ "$NO_DESKTOP" -eq 0 ]]; then
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.background picture-uri "file:///usr/share/backgrounds/cloudberryos.png" || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.background picture-uri-dark "file:///usr/share/backgrounds/cloudberryos.png" || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.interface color-scheme "prefer-dark" || true
+  favorites="['cloudberryos-browser.desktop', 'cloudberryos-projects.desktop', 'cloudberryos-request-shelf.desktop'"
+  if [[ -f "$LOCAL_APPS_DIR/cloudberryos-offline-wikipedia.desktop" ]]; then
+    favorites="${favorites}, 'cloudberryos-offline-wikipedia.desktop'"
+  fi
+  favorites="${favorites}, 'org.gnome.Nautilus.desktop', 'org.kde.gcompris.desktop', 'tuxpaint.desktop', 'libreoffice-writer.desktop', 'org.kde.krita.desktop']"
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell favorite-apps "$favorites" || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-trash false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-mounts false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-show-apps-button false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-running false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock dash-max-icon-size 52 || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.ding show-home false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.ding show-trash false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.ding show-volumes false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.notifications show-banners false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.sound event-sounds false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.screensaver lock-enabled false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.session idle-delay 0 || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy mode "manual" || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy.http host "127.0.0.1" || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy.http port 3128 || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy.https host "127.0.0.1" || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy.https port 3128 || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy ignore-hosts "['localhost', '127.0.0.0/8', '::1']" || true
 fi
-favorites="${favorites}, 'org.gnome.Nautilus.desktop', 'org.kde.gcompris.desktop', 'tuxpaint.desktop', 'libreoffice-writer.desktop', 'org.kde.krita.desktop']"
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell favorite-apps "$favorites" || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-trash false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-mounts false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-show-apps-button false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-running false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock dash-max-icon-size 52 || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.ding show-home false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.ding show-trash false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.ding show-volumes false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.notifications show-banners false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.sound event-sounds false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.screensaver lock-enabled false || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.desktop.session idle-delay 0 || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy mode "manual" || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy.http host "127.0.0.1" || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy.http port 3128 || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy.https host "127.0.0.1" || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy.https port 3128 || true
-sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.system.proxy ignore-hosts "['localhost', '127.0.0.0/8', '::1']" || true
 
-cat > "$HOME_DIR/.config/mimeapps.list" <<EOF
+MIMEAPPS="$HOME_DIR/.config/mimeapps.list"
+MIMEAPPS_BAK="$HOME_DIR/.config/mimeapps.list.cloudberryos.bak"
+MIMEAPPS_MARKER="# Managed by CloudberryOS"
+# Only back up a genuine pre-existing (parent-authored) mimeapps.list, never
+# our own prior output -- otherwise every run after the first would see
+# "a file exists, no .bak yet" and spuriously back up its own last write,
+# breaking idempotency (two consecutive setup runs would no longer produce
+# byte-identical /home/<user> trees).
+if [[ -f "$MIMEAPPS" && ! -f "$MIMEAPPS_BAK" ]] && ! head -n 1 "$MIMEAPPS" | grep -qF "$MIMEAPPS_MARKER"; then
+  cp "$MIMEAPPS" "$MIMEAPPS_BAK"
+fi
+cat > "$MIMEAPPS" <<EOF
+$MIMEAPPS_MARKER
 [Default Applications]
 x-scheme-handler/http=cloudberryos-browser.desktop
 x-scheme-handler/https=cloudberryos-browser.desktop
@@ -266,8 +315,10 @@ x-scheme-handler/http=cloudberryos-browser.desktop;
 x-scheme-handler/https=cloudberryos-browser.desktop;
 text/html=cloudberryos-browser.desktop;
 EOF
-chown "$STUDENT_USER:$STUDENT_USER" "$HOME_DIR/.config/mimeapps.list"
-sudo -u "$STUDENT_USER" xdg-settings set default-web-browser cloudberryos-browser.desktop 2>/dev/null || true
+chown "$STUDENT_USER:$STUDENT_USER" "$MIMEAPPS"
+if [[ "$NO_DESKTOP" -eq 0 ]]; then
+  sudo -u "$STUDENT_USER" xdg-settings set default-web-browser cloudberryos-browser.desktop 2>/dev/null || true
+fi
 
 cat > "$HOME_DIR/.config/environment.d/cloudberryos-proxy.conf" <<'EOF'
 http_proxy=http://127.0.0.1:3128
@@ -281,13 +332,10 @@ chown "$STUDENT_USER:$STUDENT_USER" "$HOME_DIR/.config/environment.d/cloudberryo
 
 write_firefox_userjs() {
   local profile_dir="$1"
-  local homepage="file://${HOME_DIR}/CloudberryOS/site/home/index.html"
-  if [[ ! -f "$HOME_DIR/CloudberryOS/site/home/index.html" ]]; then
-    homepage="file://${PREFIX}/home/index.html"
-  fi
   install -d -o "$STUDENT_USER" -g "$STUDENT_USER" "$profile_dir"
   cat > "$profile_dir/user.js" <<EOF
-user_pref("browser.startup.homepage", "$homepage");
+$USERJS_MARKER
+user_pref("browser.startup.homepage", "$HOME_URL");
 user_pref("browser.startup.page", 1);
 user_pref("browser.newtabpage.enabled", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
@@ -310,10 +358,12 @@ EOF
 }
 
 write_firefox_userjs "$HOME_DIR/.cloudberryos/firefox-profile"
-if [[ -d "$HOME_DIR/snap/firefox/common/.mozilla/firefox" ]]; then
+for profile_root in "$HOME_DIR/snap/firefox/common/.mozilla/firefox" "$HOME_DIR/.mozilla/firefox"; do
+  [[ -d "$profile_root" ]] || continue
   while IFS= read -r profile_dir; do
     [[ -f "$profile_dir/prefs.js" || -f "$profile_dir/times.json" ]] || continue
     write_firefox_userjs "$profile_dir"
     rm -f "$profile_dir/sessionstore.jsonlz4" "$profile_dir/sessionstore-backups"/*.jsonlz4 2>/dev/null || true
-  done < <(find "$HOME_DIR/snap/firefox/common/.mozilla/firefox" -mindepth 1 -maxdepth 1 -type d)
-fi
+  done < <(find "$profile_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+done
+chown "$STUDENT_USER:$STUDENT_USER" "$HOME_DIR/.cloudberryos" 2>/dev/null || true

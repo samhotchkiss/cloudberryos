@@ -57,8 +57,17 @@ stage_unit() {
 
 stage_setup() {
   echo "== stage: setup =="
-  echo "setup stage not implemented yet (M1)" >&2
-  exit 1
+  # M1 acceptance gate (docs/packaging-goal.md "M1 -- Code rework").
+  # This stage is destructive to the container's /usr, /etc, /var, /home
+  # (it "fake installs" the proposed package layout onto real paths and
+  # creates a "testkid" account) -- only ever run it inside a throwaway
+  # container, e.g.:
+  #   docker run --rm -v "$PWD":/src -w /src ubuntu:26.04 bash -c \
+  #     'apt-get update -q && apt-get install -yq --no-install-recommends \
+  #        python3 python3-pytest squid nftables adduser sudo systemd \
+  #        libglib2.0-bin dbus xdg-utils && \
+  #      ci/build-and-test.sh setup'
+  bash "$REPO_ROOT/ci/setup-stage.sh"
 }
 
 stage_package() {

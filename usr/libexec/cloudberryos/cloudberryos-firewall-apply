@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Static, non-generated nftables apply script for CloudberryOS.
+#
+# Enforces the per-child web-egress boundary described in
+# docs/packaging-goal.md "Security Model": for every UID listed in
+# /etc/cloudberryos/student-users, reject outbound TCP 80/443 and UDP 443
+# (QUIC/HTTP-3), forcing web traffic through the local squid allowlist
+# proxy on 127.0.0.1:3128. Loopback is allowed EXCEPT the admin panel
+# port (8766, M4) -- the child is a local user and can otherwise reach
+# 127.0.0.1 directly.
+#
+# One ruleset, "table inet cloudberryos", covers BOTH IPv4 and IPv6 (the
+# "inet" family matches independent of address family; "oif lo" matches
+# the loopback interface regardless of whether traffic is IPv4 or IPv6,
+# so the loopback accept naturally covers ::1 too). This closes prototype
+# defect #1 (the old iptables-only firewall left IPv6 egress unfiltered).
+#
+# Applied atomically via `nft -f`: this script always targets only its
+# own table (never `flush ruleset`), so it never disturbs rules other
+# software may have installed. Idempotent: re-running produces the same
+# ruleset, never duplicate rules (see the flush-then-redeclare idiom
+# below).
+#
+# `--teardown` deletes the table outright. This is wired up as the
+# systemd unit's ExecStop, so stopping/disabling the service actually
+# removes the kernel state (fixes prototype defect #2: the old unit had
+# no ExecStop and left rules live after a stop/disable until reboot).
+set -euo pipefail
+
+TABLE_FAMILY="inet"
+TABLE_NAME="cloudberryos"
+STUDENT_USERS_FILE="/etc/cloudberryos/student-users"
+ADMIN_PORT=8766
+
+teardown() {
+  nft delete table "${TABLE_FAMILY}" "${TABLE_NAME}" 2>/dev/null || true
+}
+
+if [[ "${1:-}" == "--teardown" ]]; then
+  teardown
+  exit 0
+fi
+
+if ! command -v nft >/dev/null 2>&1; then
+  echo "cloudberryos-firewall-apply: nft not found" >&2
+  exit 1
+fi
+
+uids=()
+if [[ -f "$STUDENT_USERS_FILE" ]]; then
+  while IFS= read -r user; do
+    [[ -z "$user" ]] && continue
+    if id "$user" >/dev/null 2>&1; then
+      uids+=("$(id -u "$user")")
+    fi
+  done < "$STUDENT_USERS_FILE"
+fi
+
+ruleset_file="$(mktemp)"
+trap 'rm -f "$ruleset_file"' EXIT
+
+{
+  # Ensure the table/chain exist first (no-op if they already do), then
+  # flush just this chain, then redeclare it with the current rule set.
+  # This is the standard atomic-replace idiom for a single nftables table:
+  # it never touches any other table's rules, and re-running it is a
+  # pure idempotent no-op when student-users hasn't changed.
+  echo "add table ${TABLE_FAMILY} ${TABLE_NAME}"
+  echo "add chain ${TABLE_FAMILY} ${TABLE_NAME} output { type filter hook output priority filter ; policy accept ; }"
+  echo "flush chain ${TABLE_FAMILY} ${TABLE_NAME} output"
+
+  for uid in "${uids[@]}"; do
+    # Order matters: the admin-port reject MUST precede the loopback
+    # accept, or the child could reach the (M4) admin panel over lo.
+    echo "add rule ${TABLE_FAMILY} ${TABLE_NAME} output meta skuid ${uid} oif lo tcp dport ${ADMIN_PORT} reject"
+    echo "add rule ${TABLE_FAMILY} ${TABLE_NAME} output meta skuid ${uid} oif lo accept"
+    echo "add rule ${TABLE_FAMILY} ${TABLE_NAME} output meta skuid ${uid} tcp dport { 80, 443 } reject"
+    echo "add rule ${TABLE_FAMILY} ${TABLE_NAME} output meta skuid ${uid} udp dport 443 reject"
+  done
+} > "$ruleset_file"
+
+nft -f "$ruleset_file"
