@@ -1,0 +1,126 @@
+{
+  "brand": "CloudberryOS",
+  "default_student": "Explorer",
+  "theme": {
+    "accent": "#2f6f73"
+  },
+  "resources": [
+    {
+      "title": "Wikipedia",
+      "url": "https://www.wikipedia.org/",
+      "category": "Look Up",
+      "summary": "A quiet place to look things up and follow real curiosity.",
+      "allow_domains": [
+        "wikipedia.org",
+        "wikimedia.org",
+        "mediawiki.org"
+      ],
+      "search": {
+        "label": "Search Wikipedia",
+        "action": "https://en.wikipedia.org/w/index.php",
+        "query_param": "search",
+        "placeholder": "bridges, owls, volcanoes..."
+      }
+    },
+    {
+      "title": "Khan Academy",
+      "url": "https://www.khanacademy.org/math/early-math",
+      "category": "Learn",
+      "summary": "Early math practice that builds skill without wandering.",
+      "allow_domains": [
+        "khanacademy.org",
+        "kastatic.org",
+        "kasandbox.org",
+        "ka-cs-scratchpad-audio.s3.amazonaws.com",
+        "cookielaw.org",
+        "onetrust.com",
+        "youtube-nocookie.com",
+        "ytimg.com",
+        "googlevideo.com"
+      ]
+    },
+    {
+      "title": "NASA Space Place",
+      "url": "https://spaceplace.nasa.gov/",
+      "category": "Explore",
+      "summary": "Space, Earth, planets, and hands-on science from NASA.",
+      "allow_domains": [
+        "nasa.gov"
+      ]
+    },
+    {
+      "title": "NASA Image Library",
+      "url": "https://images.nasa.gov/",
+      "category": "Explore",
+      "summary": "Real images, audio, and video from NASA missions.",
+      "allow_domains": [
+        "nasa.gov"
+      ]
+    },
+    {
+      "title": "Smithsonian Learning Lab",
+      "url": "https://learninglab.si.edu/",
+      "category": "Explore",
+      "summary": "Museum collections, history, science, and art.",
+      "allow_domains": [
+        "si.edu"
+      ]
+    },
+    {
+      "title": "Library of Congress",
+      "url": "https://www.loc.gov/collections/",
+      "category": "Explore",
+      "summary": "Primary sources, photos, maps, recordings, and exhibits.",
+      "allow_domains": [
+        "loc.gov"
+      ]
+    },
+    {
+      "title": "Project Gutenberg",
+      "url": "https://www.gutenberg.org/ebooks/bookshelf/20",
+      "category": "Read",
+      "summary": "Free public-domain children's books and classics.",
+      "allow_domains": [
+        "gutenberg.org"
+      ]
+    },
+    {
+      "title": "OpenStax",
+      "url": "https://openstax.org/subjects",
+      "category": "Learn",
+      "summary": "Free textbooks and learning material for deeper dives.",
+      "allow_domains": [
+        "openstax.org"
+      ]
+    },
+    {
+      "title": "TypingClub",
+      "url": "https://www.edclub.com/sportal/program-3.game",
+      "category": "Practice",
+      "summary": "Keyboard practice through the Jungle Junior typing course.",
+      "allow_domains": [
+        "typingclub.com",
+        "edclub.com",
+        "school.edclub.com",
+        "edclub.app",
+        "privacy-center.org"
+      ]
+    }
+  ],
+  "youtube": {
+    "videos": [
+      {
+        "title": "Don't Hate - eCVTs Are Genius Transmissions!",
+        "youtube_id": "dxmxIsoV_Xo",
+        "category": "Watch",
+        "summary": "Engineering Explained on how eCVTs work."
+      }
+    ],
+    "channels": []
+  },
+  "extra_allow_domains": [
+    "ocsp.digicert.com",
+    "ocsp.pki.goog",
+    "pki.goog"
+  ]
+}

@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="CloudberryOS turns Ubuntu into a calm, creative computer for children, with a curated web and a fully unlocked parent account." />
+  <title>CloudberryOS — Ubuntu for curious kids</title>
+  <link rel="stylesheet" href="/assets/cloudberryos-public.css" />
+</head>
+<body>
+  <header class="hero" id="top">
+    <nav class="nav" aria-label="Main navigation">
+      <a class="brand" href="#top">
+        <img src="/assets/icons/cloudberryos-browser.svg" alt="" />
+        <span>CloudberryOS</span>
+      </a>
+      <div class="nav-links">
+        <a href="#why">Why</a>
+        <a href="#experience">Experience</a>
+        <a href="#install">Install</a>
+        <a href="#roadmap">Roadmap</a>
+      </div>
+    </nav>
+
+    <div class="hero-copy">
+      <p class="status">Developer preview · Public package in progress</p>
+      <h1>CloudberryOS</h1>
+      <p class="hero-lede">A real Ubuntu computer for curious kids, with the web turned into a shelf instead of a slot machine.</p>
+      <div class="hero-actions">
+        <a class="primary-action" href="#install">See how installation works</a>
+        <a class="text-action" href="/home/index.html">Open the child experience <span aria-hidden="true">↗</span></a>
+      </div>
+    </div>
+
+    <p class="hero-note">Made for questions, pictures, beats, stories, code, stars, and things worth keeping.</p>
+  </header>
+
+  <main>
+    <section class="manifesto" id="why">
+      <div class="section-label">The idea</div>
+      <div class="manifesto-copy">
+        <h2>The internet should be a library, not a casino.</h2>
+        <p>CloudberryOS is an Ubuntu overlay for children. It gives them a beautiful workshop full of serious creative tools, while replacing the open web with a small collection of places chosen by a parent.</p>
+      </div>
+      <div class="principles">
+        <article>
+          <span>01</span>
+          <h3>Powerful, not patronizing</h3>
+          <p>Photo editing, music production, animation, programming, writing, science, and offline reference tools remain child-facing.</p>
+        </article>
+        <article>
+          <span>02</span>
+          <h3>Curated, not surveilled</h3>
+          <p>Wikipedia, Khan Academy, NASA, TypingClub, and parent-approved resources replace feeds, ads, recommendations, and doomscrolling.</p>
+        </article>
+        <article>
+          <span>03</span>
+          <h3>The parent stays in charge</h3>
+          <p>The child uses a non-admin account. The parent account remains a normal, fully unlocked Ubuntu administrator account.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="experience" id="experience">
+      <div class="experience-copy">
+        <p class="eyebrow">The child experience</p>
+        <h2>A place to begin, not another feed to escape.</h2>
+        <p>Each child gets a personal workshop with Wikipedia search, approved learning resources, selected videos, offline knowledge, and invitations to make something of their own.</p>
+        <a href="/home/index.html">Explore Noah’s workshop <span aria-hidden="true">↗</span></a>
+      </div>
+      <div class="browser-preview" aria-label="Preview of the CloudberryOS child homepage">
+        <div class="browser-bar" aria-hidden="true">
+          <span></span><span></span><span></span>
+          <p>cloudberryos / home</p>
+        </div>
+        <iframe src="/home/index.html" title="Noah's CloudberryOS workshop" loading="lazy"></iframe>
+      </div>
+    </section>
+
+    <section class="what-it-does">
+      <div class="section-label">What it changes</div>
+      <div class="feature-rows">
+        <article>
+          <p>01 · Web</p>
+          <h3>A parent-built shelf</h3>
+          <span>Direct student web traffic is restricted to approved domains. Wikipedia keeps its pictures. Khan Academy’s embedded lessons still work.</span>
+        </article>
+        <article>
+          <p>02 · Video</p>
+          <h3>YouTube without YouTube</h3>
+          <span>Parents approve individual videos. Children watch them inside CloudberryOS without the homepage, comments, shorts, or recommendation feed.</span>
+        </article>
+        <article>
+          <p>03 · Computer</p>
+          <h3>A creative workshop</h3>
+          <span>Apps are organized around activities: make a beat, edit a photo, animate a story, code a game, explore the sky, or write a book.</span>
+        </article>
+        <article>
+          <p>04 · Parent</p>
+          <h3>Designed to grow</h3>
+          <span>Resources and videos live in portable configuration. A parent admin panel, app packs, channel approval, and time budgets are on the roadmap.</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="apps">
+      <div class="apps-heading">
+        <p class="eyebrow">Not a toy computer</p>
+        <h2>Real tools for real interests.</h2>
+      </div>
+      <div class="app-groups">
+        <div><span>Art & photos</span><p>Tux Paint · GIMP · Krita · Shotwell · Inkscape</p></div>
+        <div><span>Music & beats</span><p>Hydrogen · LMMS · Audacity · Mixxx · Sonic Pi</p></div>
+        <div><span>Stories & film</span><p>LibreOffice · Pencil2D · Stopmotion · Kdenlive · Scribus</p></div>
+        <div><span>Code & making</span><p>KTurtle · Thonny · Pygame · Godot · Arduino · OpenSCAD</p></div>
+        <div><span>Science & world</span><p>Kiwix · GCompris · Marble · KStars · Kalzium · Stellarium</p></div>
+      </div>
+    </section>
+
+    <section class="install" id="install">
+      <div class="install-heading">
+        <p class="eyebrow">Install CloudberryOS</p>
+        <h2>Start with a spare Ubuntu laptop.</h2>
+        <p>CloudberryOS currently exists as a working developer preview. The public `.deb` and guided setup wizard are the next release milestone.</p>
+      </div>
+
+      <div class="install-grid">
+        <article class="available-now">
+          <div class="install-state">Current build · Source-only</div>
+          <h3>Install from the source tree</h3>
+          <p>For collaborators who already have the source tree: on a laptop running Ubuntu, open a terminal in the CloudberryOS folder and run:</p>
+          <pre><code>sudo ./install.sh \
+  --student "Noah" \
+  --student-user noah \
+  --no-student-password \
+  --autologin \
+  --no-policies</code></pre>
+          <p class="warning"><strong>Use a spare laptop.</strong> The preview changes login behavior, browser configuration, proxy rules, firewall rules, and the student desktop. The parent account remains an administrator.</p>
+        </article>
+
+        <article class="package-next">
+          <div class="install-state">Next · Public package</div>
+          <h3>The intended installation</h3>
+          <p>The signed package will install CloudberryOS itself. A guided setup screen will then ask for the child’s name, account, app packs, resources, and login choices.</p>
+          <pre><code>sudo apt install ./cloudberryos.deb
+sudo cloudberryos-setup</code></pre>
+          <ul>
+            <li>Repeatable installs for siblings and classrooms</li>
+            <li>Updates through normal Ubuntu package tools</li>
+            <li>Family settings preserved across upgrades</li>
+            <li>Clear uninstall and recovery path</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="install-truth">
+        <strong>There is not yet a public one-click download.</strong>
+        <span>We are saying that plainly because software that changes a child’s account and network access should be reviewable, reversible, and tested before it is presented as effortless.</span>
+      </div>
+    </section>
+
+    <section class="roadmap" id="roadmap">
+      <div class="section-label">Roadmap</div>
+      <div class="roadmap-intro">
+        <h2>Useful now. Portable next. More humane over time.</h2>
+      </div>
+      <div class="roadmap-columns">
+        <article>
+          <p>V1</p>
+          <h3>The dependable Ubuntu overlay</h3>
+          <span>Curated browser, child account, local homepage, approved videos, network enforcement, app packs, `.deb` installer, and repeatable updates.</span>
+        </article>
+        <article>
+          <p>V2</p>
+          <h3>The parent control surface</h3>
+          <span>Local and Tailscale admin panel, approved channels, video time budgets, resource requests, config export, and richer project organization.</span>
+        </article>
+        <article>
+          <p>Later</p>
+          <h3>A shared public project</h3>
+          <span>Signed package repository, documented compatibility, classroom-friendly setup, community resource catalogs, and perhaps a complete install image.</span>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <a class="brand" href="#top">
+      <img src="/assets/icons/cloudberryos-browser.svg" alt="" />
+      <span>CloudberryOS</span>
+    </a>
+    <p>A calmer computer for curious kids.</p>
+    <a href="/home/index.html">Open the child experience ↗</a>
+  </footer>
+</body>
+</html>

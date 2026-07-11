@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 3840 2160">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#17343a"/>
+      <stop offset="0.48" stop-color="#2f6f73"/>
+      <stop offset="1" stop-color="#f2c05c"/>
+    </linearGradient>
+    <linearGradient id="hillA" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#315d55"/>
+      <stop offset="1" stop-color="#6f9d68"/>
+    </linearGradient>
+    <linearGradient id="hillB" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#203f42"/>
+      <stop offset="1" stop-color="#46736d"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#fff2b5"/>
+      <stop offset="0.72" stop-color="#e9b44c"/>
+      <stop offset="1" stop-color="#d79436"/>
+    </radialGradient>
+  </defs>
+  <rect width="3840" height="2160" fill="url(#sky)"/>
+  <circle cx="3040" cy="420" r="168" fill="url(#sun)"/>
+  <g fill="#ffffff" opacity="0.9">
+    <circle cx="420" cy="300" r="3"/>
+    <circle cx="560" cy="450" r="2"/>
+    <circle cx="820" cy="260" r="2"/>
+    <circle cx="1150" cy="380" r="3"/>
+    <circle cx="1500" cy="240" r="2"/>
+    <circle cx="1880" cy="360" r="2"/>
+    <circle cx="2300" cy="270" r="3"/>
+    <circle cx="2650" cy="520" r="2"/>
+    <circle cx="3330" cy="300" r="2"/>
+  </g>
+  <path d="M0 1180 C520 900 850 1080 1240 910 C1690 710 2050 1040 2460 830 C2880 620 3210 920 3840 700 L3840 2160 L0 2160 Z" fill="url(#hillB)"/>
+  <path d="M0 1390 C560 1110 940 1280 1360 1130 C1810 970 2110 1300 2520 1110 C2980 900 3290 1240 3840 990 L3840 2160 L0 2160 Z" fill="url(#hillA)"/>
+  <path d="M0 1620 C620 1420 880 1570 1270 1430 C1780 1240 2150 1510 2570 1370 C3020 1220 3370 1430 3840 1280 L3840 2160 L0 2160 Z" fill="#182d31" opacity="0.95"/>
+  <g transform="translate(340 1420)">
+    <rect x="0" y="140" width="460" height="300" rx="18" fill="#f8faf7"/>
+    <path d="M-20 150 L230 0 L480 150 Z" fill="#9b5d73"/>
+    <rect x="70" y="230" width="110" height="210" fill="#2f6f73"/>
+    <rect x="260" y="220" width="120" height="90" rx="10" fill="#e9b44c"/>
+    <rect x="292" y="0" width="64" height="110" fill="#6b404d"/>
+  </g>
+  <g transform="translate(2980 1330)">
+    <rect x="0" y="100" width="360" height="420" rx="28" fill="#f8faf7"/>
+    <rect x="42" y="158" width="276" height="170" rx="18" fill="#17343a"/>
+    <rect x="110" y="372" width="140" height="148" fill="#9b5d73"/>
+    <circle cx="180" cy="238" r="54" fill="#e9b44c"/>
+  </g>
+  <text x="220" y="1950" fill="#f8faf7" font-family="Inter, Segoe UI, sans-serif" font-size="72" font-weight="800">CloudberryOS</text>
+  <text x="224" y="2035" fill="#d8e1df" font-family="Inter, Segoe UI, sans-serif" font-size="34">Noah's workshop for making, learning, and exploring</text>
+</svg>
+
