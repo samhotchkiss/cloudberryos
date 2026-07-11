@@ -121,28 +121,33 @@
       <div class="install-heading">
         <p class="eyebrow">Install CloudberryOS</p>
         <h2>Start with a spare Ubuntu laptop.</h2>
-        <p>CloudberryOS currently exists as a working developer preview. The public `.deb` and guided setup wizard are the next release milestone.</p>
+        <p>CloudberryOS installs as a Debian package with a guided setup command. Until signed releases are published, you build that package from source on the Ubuntu 26.04 machine you’re setting up — the steps below are exactly that.</p>
       </div>
 
       <div class="install-grid">
         <article class="available-now">
-          <div class="install-state">Current build · Source-only</div>
-          <h3>Install from the source tree</h3>
-          <p>For collaborators who already have the source tree: on a laptop running Ubuntu, open a terminal in the CloudberryOS folder and run:</p>
-          <pre><code>sudo ./install.sh \
-  --student "Noah" \
-  --student-user noah \
-  --no-student-password \
-  --autologin \
-  --no-policies</code></pre>
-          <p class="warning"><strong>Use a spare laptop.</strong> The preview changes login behavior, browser configuration, proxy rules, firewall rules, and the student desktop. The parent account remains an administrator.</p>
+          <div class="install-state">Install today · Build from source</div>
+          <h3>Build the package, then install it</h3>
+          <p>On the Ubuntu 26.04 laptop you’re setting up, from the parent/admin account, build and install the CloudberryOS package:</p>
+          <pre><code>sudo apt install -y devscripts debhelper
+git clone https://github.com/samhotchkiss/cloudberryos.git
+cd cloudberryos
+dpkg-buildpackage -us -uc -b
+sudo apt install ../cloudberryos_0.2.0_all.deb</code></pre>
+          <p>Then run the guided setup — it creates the child account and applies the curated homepage, proxy, firewall, and desktop:</p>
+          <pre><code>sudo cloudberryos-setup</code></pre>
+          <p>Or non-interactively, for example a young-child device with no login password:</p>
+          <pre><code>sudo cloudberryos-setup --non-interactive \
+  --child-name "Noah" --student-user noah \
+  --no-password --autologin --apps recommended</code></pre>
+          <p class="warning"><strong>Use a spare laptop.</strong> The install changes login behavior, browser configuration, proxy rules, firewall rules, and the student desktop. The parent account remains an administrator.</p>
         </article>
 
         <article class="package-next">
-          <div class="install-state">Next · Public package</div>
-          <h3>The intended installation</h3>
-          <p>The signed package will install CloudberryOS itself. A guided setup screen will then ask for the child’s name, account, app packs, resources, and login choices.</p>
-          <pre><code>sudo apt install ./cloudberryos.deb
+          <div class="install-state">Coming · Signed releases</div>
+          <h3>One-line install, later</h3>
+          <p>A signed apt repository will let families install and update without building anything. The setup command stays the same:</p>
+          <pre><code>sudo apt install cloudberryos
 sudo cloudberryos-setup</code></pre>
           <ul>
             <li>Repeatable installs for siblings and classrooms</li>
