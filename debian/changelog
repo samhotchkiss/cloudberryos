@@ -1,3 +1,15 @@
+cloudberryos (0.2.0) unstable; urgency=medium
+
+  * M4: parent admin panel (cloudberryos-admin + cloudberryos-admin.service),
+    reachable on 127.0.0.1:8766 only, with mandatory token auth, CSRF-
+    protected state-changing requests, and constant-time credential
+    comparisons. cloudberryos-setup gains the tri-state --admin-panel
+    off|local|tailnet flag; the new default (tailnet if Tailscale is
+    installed and up, else local) publishes the admin panel to the
+    tailnet over HTTPS via `tailscale serve` (never `funnel`).
+
+ -- Sam <s@swh.me>  Sat, 11 Jul 2026 18:00:00 -0600
+
 cloudberryos (0.1.0) unstable; urgency=medium
 
   * Initial release: cloudberryos-setup wizard, curated local homepage,

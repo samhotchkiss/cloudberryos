@@ -1,0 +1,24 @@
+[Unit]
+Description=CloudberryOS parent admin panel
+After=network-pre.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/cloudberryos-admin serve
+Restart=on-failure
+
+# Runs as root (V1). This is acceptable ONLY because token auth is
+# mandatory on every request from the very first commit: cloudberryos-admin
+# binds ONLY 127.0.0.1:8766 and rejects any request without a valid,
+# freshly-verified session cookie (obtainable only by presenting the
+# contents of /etc/cloudberryos/admin-token, root:root 0600). Root is what
+# lets /api/apply shell out to /usr/sbin/cloudberryos-apply (which itself
+# needs root to rewrite /etc/squid, /etc/cloudberryos, run systemctl, etc).
+# See docs/packaging-goal.md's "Admin panel" Locked Decision and the
+# cloudberryos-admin module docstring for the full auth model. A non-root
+# split (dedicated service user + a narrowly-scoped root helper just for
+# apply) is deferred to "Admin panel V1.1+".
+User=root
+
+[Install]
+WantedBy=multi-user.target

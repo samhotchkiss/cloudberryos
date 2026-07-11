@@ -76,7 +76,16 @@ def build_parser():
     parser.add_argument("--apps", metavar="recommended|none|LIST")
     parser.add_argument("--offline-wikipedia", action="store_true")
     parser.add_argument("--no-offline-wikipedia", action="store_true")
-    parser.add_argument("--admin-panel", choices=["local", "off"])
+    parser.add_argument(
+        "--admin-panel",
+        choices=["local", "tailnet", "off"],
+        help=(
+            "off|local|tailnet -- when omitted and no saved profile value exists, defaults to "
+            "tailnet if Tailscale is installed and up ('tailscale status' succeeds), else local. "
+            "tailnet additionally publishes the loopback-only admin panel to the tailnet over "
+            "HTTPS via 'tailscale serve'."
+        ),
+    )
     parser.add_argument("--install-browser-policies", action="store_true")
     parser.add_argument("--import-catalog", action="store_true")
     parser.add_argument("--no-import-catalog", action="store_true")
@@ -448,7 +457,13 @@ def run_setup(args):
         import_catalog = False
     elif args.import_catalog:
         import_catalog = True
-    admin_panel = args.admin_panel or existing_profile.get("admin_panel") or "off"
+    # Tri-state admin panel (M4). If neither a flag nor a saved profile value
+    # is present, the M4 default is to *attempt* tailnet exposure;
+    # resolve_admin_panel_mode() below verifies Tailscale is actually usable
+    # and degrades to "local" (never fails setup) if it is absent or down.
+    # An explicit or previously-saved "off"/"local" is never second-guessed.
+    requested_admin_panel = args.admin_panel or existing_profile.get("admin_panel") or "tailnet"
+    admin_panel = common.resolve_admin_panel_mode(requested_admin_panel, warn)
     install_browser_policies = args.install_browser_policies or bool(existing_profile.get("install_browser_policies", False))
 
     no_desktop = args.no_desktop or (not common.gnome_shell_present()) or common.running_in_container()
@@ -515,10 +530,32 @@ def run_setup(args):
     # --- App packs ---
     install_apps(apps_list, warn)
 
+    # --- Admin panel (M4): token + tailnet exposure. This runs regardless of
+    # `deferred` -- `tailscale serve` talks to tailscaled, not systemd, and
+    # the M4 acceptance gate exercises it in plain Docker (no systemd) with
+    # a mocked tailscale binary, so it must not be skipped there. Actual
+    # systemd enable/start of cloudberryos-admin.service is still gated by
+    # `deferred` below, alongside the other units.
+    admin_token_created = False
+    if admin_panel != "off":
+        _admin_token, admin_token_created = common.ensure_admin_token()
+    if admin_panel == "tailnet":
+        tbin = common.tailscale_bin()
+        if tbin and common.tailscale_is_up(tbin):
+            common.tailscale_check_magicdns_https(tbin, warn)
+            if not common.tailscale_serve_publish(tbin, 8766, warn):
+                warn("'tailscale serve' failed -- the admin panel remains loopback-only until this is retried")
+        else:
+            # Defensive only: resolve_admin_panel_mode() already verified
+            # this before returning "tailnet" above.
+            warn("tailscale became unavailable between mode resolution and serve setup -- admin panel remains loopback-only")
+
     # --- Service enablement (auto-degrades when systemd is not PID 1) ---
     if deferred:
         warn("systemd unavailable (/run/systemd/system absent) -- skipping enable of cloudberryos-firewall.service")
         warn(f"systemd unavailable (/run/systemd/system absent) -- skipping enable of cloudberryos-home@{student_user}.service")
+        if admin_panel != "off":
+            warn("systemd unavailable (/run/systemd/system absent) -- skipping enable of cloudberryos-admin.service")
     else:
         common.run(["systemctl", "daemon-reload"])
         kill_stale_home_server(student_user, warn)
@@ -533,6 +570,18 @@ def run_setup(args):
         result = common.run(["systemctl", "enable", "--now", f"cloudberryos-home@{student_user}.service"])
         if result.returncode != 0:
             warn(f"systemctl enable --now cloudberryos-home@{student_user}.service failed: {result.stderr.strip()}")
+
+        if admin_panel == "off":
+            common.run(["systemctl", "disable", "--now", "cloudberryos-admin.service"])
+        else:
+            admin_unit = common._first_existing([
+                Path("/usr/lib/systemd/system/cloudberryos-admin.service"),
+                common.find_repo_root() / "usr" / "lib" / "systemd" / "system" / "cloudberryos-admin.service",
+            ])
+            if admin_unit is not None:
+                result = common.run(["systemctl", "enable", "--now", "cloudberryos-admin.service"])
+                if result.returncode != 0:
+                    warn(f"systemctl enable --now cloudberryos-admin.service failed: {result.stderr.strip()}")
 
     if offline_wikipedia:
         print_offline_wikipedia_instructions()
@@ -559,6 +608,16 @@ def run_setup(args):
     if deferred:
         print("cloudberryos-setup: service operations were deferred (no live systemd in this environment).")
         print("Re-run cloudberryos-setup once systemd is available to complete them.")
+
+    if admin_panel != "off":
+        print(f"cloudberryos-setup: admin panel mode: {admin_panel}")
+        if admin_token_created:
+            token_value = (common.read_text_or_none(common.ADMIN_TOKEN_PATH) or "").strip()
+            print("cloudberryos-setup: admin panel token (save this now -- it is only printed once;")
+            print(f"  retrieve it again later with 'sudo cat {common.ADMIN_TOKEN_PATH}'):")
+            print(f"  {token_value}")
+        else:
+            print(f"cloudberryos-setup: admin panel token already set; retrieve it with 'sudo cat {common.ADMIN_TOKEN_PATH}'")
     return 0
 
 

@@ -5,7 +5,11 @@
 #   unit     - M0+: run the pytest suite against tools/ (stdlib + pytest only).
 #   setup    - M1+: artifact generation + cloudberryos-setup + idempotency checks.
 #   package  - M2+: debian package build/lint/lifecycle checks.
-#   upgrade  - M3+: local-repo upgrade checks.
+#   upgrade  - M3+: local-repo upgrade checks (+ M4: a real 0.1.0 -> 0.2.0
+#              upgrade built from a git worktree at the pre-M4 commit).
+#   admin    - M4+: cloudberryos-admin auth/CSRF/round-trip + mocked-tailscale
+#              serve/degrade checks (plain Docker; the child-UID firewall
+#              refusal is under --services, Block C).
 #
 # Usage:
 #   ci/build-and-test.sh                # runs all plain-Docker stages defined so far
@@ -36,12 +40,12 @@ for arg in "$@"; do
     --services)
       RUN_SERVICES=1
       ;;
-    unit|setup|package|upgrade)
+    unit|setup|package|upgrade|admin)
       STAGES+=("$arg")
       ;;
     *)
       echo "unknown argument: $arg" >&2
-      echo "usage: $0 [unit|setup|package|upgrade] [--services]" >&2
+      echo "usage: $0 [unit|setup|package|upgrade|admin] [--services]" >&2
       exit 1
       ;;
   esac
@@ -86,11 +90,34 @@ stage_package() {
 stage_upgrade() {
   echo "== stage: upgrade =="
   # M3 acceptance gate (docs/packaging-goal.md "M3 -- Upgrades and
-  # migrations"). Runs on the HOST (needs Docker): builds 0.1.0 from the
-  # real committed source plus throwaway 0.1.1/0.1.2 workspaces (never
-  # committed), then exercises direct upgrade, failing-migration recovery,
-  # and the local signed-repo upgrade, each in its own fresh container.
+  # migrations"). Runs on the HOST (needs Docker): builds the current
+  # version from the real committed source plus throwaway patch-bumped
+  # workspaces (never committed), then exercises direct upgrade,
+  # failing-migration recovery, and the local signed-repo upgrade, each in
+  # its own fresh container.
   bash "$REPO_ROOT/ci/upgrade-stage.sh"
+  # M4 acceptance gate addition (docs/packaging-goal.md "M4 -- Admin
+  # panel", "Regression at 0.2.0"): a real 0.1.0 -> 0.2.0 direct upgrade,
+  # built from a git worktree at the pinned pre-M4 commit (0.1.0) and the
+  # current working tree (0.2.0) -- proves profile.json, resources.json,
+  # and admin-token all survive a real cross-milestone upgrade.
+  bash "$REPO_ROOT/ci/m4-upgrade-stage.sh"
+}
+
+stage_admin() {
+  echo "== stage: admin =="
+  # M4 acceptance gate (docs/packaging-goal.md "M4 -- Admin panel"). Like
+  # stage_setup, this runs *inside* an already-provisioned container (see
+  # docs/packaging-goal.md "Test environment"), e.g.:
+  #   docker run --rm -v "$PWD":/src -w /src ubuntu:26.04 bash -c \
+  #     'apt-get update -q && apt-get install -yq --no-install-recommends \
+  #        python3 python3-pytest squid nftables adduser sudo libglib2.0-bin \
+  #        dbus xdg-utils curl iproute2 && \
+  #      ci/build-and-test.sh admin'
+  # The child-UID firewall-refusal assertion needs a live nft ruleset and
+  # is therefore under --services (Block C, ci/services-checks-admin.sh)
+  # instead of here.
+  bash "$REPO_ROOT/ci/admin-checks.sh"
 }
 
 for stage in "${STAGES[@]}"; do
@@ -99,16 +126,19 @@ for stage in "${STAGES[@]}"; do
     setup) stage_setup ;;
     package) stage_package ;;
     upgrade) stage_upgrade ;;
+    admin) stage_admin ;;
   esac
 done
 
 if [[ "$RUN_SERVICES" -eq 1 ]]; then
   echo "== --services requested =="
   # M2 acceptance gate, Block B (docs/packaging-goal.md "M2 -- Debian
-  # packaging and lifecycle", service-level checks). Needs a booted
+  # packaging and lifecycle", service-level checks), plus M4's Block C
+  # (docs/packaging-goal.md "M4 -- Admin panel": the child-UID-vs-8766
+  # firewall assertion, ci/services-checks-admin.sh). Needs a booted
   # systemd -- tries a derived systemd-in-Docker image first per the
   # doc's Dockerfile, falls back to the Lima VM immediately if that
-  # misbehaves. Requires dist/cloudberryos_0.1.0_all.deb to already exist
-  # (run the package stage, or ci/package-stage.sh, first).
+  # misbehaves. Requires dist/cloudberryos_<version>_all.deb to already
+  # exist (run the package stage, or ci/package-stage.sh, first).
   bash "$REPO_ROOT/ci/services-stage.sh"
 fi

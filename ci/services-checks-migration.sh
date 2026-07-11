@@ -4,14 +4,16 @@
 # level checks). Runs INSIDE a booted systemd container/VM, in ITS OWN
 # fresh instance (never the same one as ci/services-checks-live.sh --
 # this test wants a clean prototype install, not one already carrying
-# packaged state). Requires dist/cloudberryos_0.1.0_all.deb to exist.
+# packaged state). Requires dist/cloudberryos_<version>_all.deb to exist.
 # Destructive -- only ever run in a throwaway systemd container or VM.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source "$REPO_ROOT/ci/version.sh"
+VERSION="$(cloudberryos_version "$REPO_ROOT/debian/changelog")"
 
-DEB="dist/cloudberryos_0.1.0_all.deb"
+DEB="dist/cloudberryos_${VERSION}_all.deb"
 test -f "$DEB" || { echo "missing $DEB -- build it first (ci/package-stage.sh)" >&2; exit 1; }
 
 step() { echo; echo "=== Block B (prototype migration) step: $1 ==="; }
@@ -47,7 +49,17 @@ test -f "$PROTOTYPE_CATALOG"
   --allow-domain migration-marker.example.org
 
 step "install the .deb over the prototype (preinst rescues the prototype catalog first)"
-apt-get install -yq --no-install-recommends "./$DEB"
+# Copy the .deb into the container's own filesystem before `apt-get install`.
+# By this point in the migration test, prototype-install.sh has already run
+# apt operations, which arms apt's `_apt` download sandbox; the sandbox user
+# then cannot read a .deb straight off the /src bind mount (apt reports it as
+# "Unsupported file"). Installing from a container-local path sidesteps that
+# entirely. (Block B's live checks install as their first apt op, before the
+# sandbox is armed, so they are unaffected -- but copying is harmless there
+# too.)
+LOCAL_DEB="/tmp/$(basename "$DEB")"
+cp "$DEB" "$LOCAL_DEB"
+apt-get install -yq --no-install-recommends "$LOCAL_DEB"
 test -f /etc/cloudberryos/resources.json
 grep -q "Migration Marker Site" /etc/cloudberryos/resources.json
 echo "confirmed: preinst rescued the prototype-edited catalog into /etc/cloudberryos/resources.json"

@@ -3,13 +3,16 @@
 %:
 	dh $@
 
-# Neither unit is auto-enabled/started by the package: cloudberryos-setup
-# enables cloudberryos-firewall.service once a student account exists, and
-# enables cloudberryos-home@<user>.service per child (see docs/packaging-goal.md
-# "Systemd units" and the "Systemd unit location" Locked Decision).
+# No unit is auto-enabled/started by the package: cloudberryos-setup enables
+# cloudberryos-firewall.service once a student account exists, enables
+# cloudberryos-home@<user>.service per child, and enables
+# cloudberryos-admin.service whenever --admin-panel resolves to local/tailnet
+# (see docs/packaging-goal.md "Systemd units", "Admin panel", and the
+# "Systemd unit location" Locked Decision).
 override_dh_installsystemd:
 	dh_installsystemd --name=cloudberryos-firewall --no-enable --no-start
 	dh_installsystemd --name=cloudberryos-home@ --no-enable --no-start
+	dh_installsystemd --name=cloudberryos-admin --no-enable --no-start
 
 # Hand-rolled install step: this repo has no upstream build system (dh_auto_install
 # no-ops), and the package layout needs two renames/duplications that a plain
@@ -24,11 +27,13 @@ override_dh_installsystemd:
 override_dh_install:
 	install -D -m 0755 usr/bin/cloudberryos-setup debian/cloudberryos/usr/bin/cloudberryos-setup
 	install -D -m 0755 usr/bin/cloudberryos-browser debian/cloudberryos/usr/bin/cloudberryos-browser
+	install -D -m 0755 usr/bin/cloudberryos-admin debian/cloudberryos/usr/bin/cloudberryos-admin
 	install -D -m 0755 tools/cloudberryos-resource.py debian/cloudberryos/usr/bin/cloudberryos-resource
 	install -D -m 0755 usr/sbin/cloudberryos-apply debian/cloudberryos/usr/sbin/cloudberryos-apply
 	install -D -m 0755 usr/libexec/cloudberryos/cloudberryos-firewall-apply debian/cloudberryos/usr/libexec/cloudberryos/cloudberryos-firewall-apply
 	install -D -m 0644 usr/lib/systemd/system/cloudberryos-firewall.service debian/cloudberryos/usr/lib/systemd/system/cloudberryos-firewall.service
 	install -D -m 0644 "usr/lib/systemd/system/cloudberryos-home@.service" "debian/cloudberryos/usr/lib/systemd/system/cloudberryos-home@.service"
+	install -D -m 0644 usr/lib/systemd/system/cloudberryos-admin.service debian/cloudberryos/usr/lib/systemd/system/cloudberryos-admin.service
 	install -D -m 0644 usr/share/applications/cloudberryos-browser.desktop debian/cloudberryos/usr/share/applications/cloudberryos-browser.desktop
 	install -D -m 0644 usr/share/applications/cloudberryos-home.desktop debian/cloudberryos/usr/share/applications/cloudberryos-home.desktop
 	install -D -m 0755 tools/build.py debian/cloudberryos/usr/share/cloudberryos/tools/build.py

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Mock `tailscale` CLI used by ci/admin-checks.sh (M4 acceptance gate) to
+# exercise cloudberryos-setup's tailnet admin-panel path without a real
+# tailnet. Point CLOUDBERRYOS_TAILSCALE_BIN at this script's path (setup's
+# common.tailscale_bin() checks that env var before falling back to
+# `shutil.which("tailscale")` -- see docs/packaging-goal.md's M4 spec,
+# "Make the tailscale calls easily mockable").
+#
+# Every invocation's argv is appended (one line, space-joined) to
+# $CLOUDBERRYOS_TAILSCALE_LOG (default /tmp/mock-tailscale.log) so the CI
+# gate can assert the exact command cloudberryos-setup ran.
+#
+# Behavior knobs (env vars), both default to "up"/enabled so the happy path
+# needs no configuration:
+#   MOCK_TAILSCALE_UP=1        -- `tailscale status` exits 0 (else 1, i.e.
+#                                  "installed but not up/logged in")
+#   MOCK_TAILSCALE_MAGICDNS=1  -- `tailscale status --json` reports
+#                                  MagicDNS + HTTPS certs enabled (else not)
+set -euo pipefail
+
+LOG="${CLOUDBERRYOS_TAILSCALE_LOG:-/tmp/mock-tailscale.log}"
+printf '%s\n' "$*" >> "$LOG"
+
+case "${1:-}" in
+  status)
+    if [[ "${2:-}" == "--json" ]]; then
+      if [[ "${MOCK_TAILSCALE_MAGICDNS:-1}" == "1" ]]; then
+        echo '{"MagicDNSEnabled": true, "CertDomains": ["test-machine.tailnet-1234.ts.net"]}'
+      else
+        echo '{"MagicDNSEnabled": false, "CertDomains": []}'
+      fi
+      exit 0
+    fi
+    if [[ "${MOCK_TAILSCALE_UP:-1}" == "1" ]]; then
+      echo "100.64.0.1     test-machine         me@             linux   -"
+      exit 0
+    else
+      echo "tailscaled not running" >&2
+      exit 1
+    fi
+    ;;
+  serve)
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac

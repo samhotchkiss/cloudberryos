@@ -10,14 +10,16 @@
 # (`limactl start template:experimental/ubuntu-26.04`) instead.
 #
 # Runs on the HOST (needs Docker and/or limactl). Requires
-# dist/cloudberryos_0.1.0_all.deb to already exist (run ci/package-stage.sh
+# dist/cloudberryos_<version>_all.deb to already exist (run ci/package-stage.sh
 # first).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source "$REPO_ROOT/ci/version.sh"
+VERSION="$(cloudberryos_version "$REPO_ROOT/debian/changelog")"
 
-DEB="dist/cloudberryos_0.1.0_all.deb"
+DEB="dist/cloudberryos_${VERSION}_all.deb"
 test -f "$DEB" || { echo "missing $DEB -- run ci/package-stage.sh first" >&2; exit 1; }
 
 IMAGE=cloudberryos-systemd-test
@@ -87,8 +89,18 @@ try_docker_systemd() {
     exit "$migration_status"
   fi
 
+  echo "== Block C (M4): admin-panel firewall test (systemd-in-Docker) =="
+  run_in_fresh_container ci/services-checks-admin.sh
+  local admin_status=$?
+  if [[ "$admin_status" -eq 99 ]]; then
+    return 99
+  elif [[ "$admin_status" -ne 0 ]]; then
+    echo "admin-panel firewall test FAILED (exit $admin_status) -- this is a real test failure, not a Docker-systemd misbehavior; not falling back to Lima" >&2
+    exit "$admin_status"
+  fi
+
   echo
-  echo "=== M2 acceptance gate, Block B: ALL STEPS PASSED (systemd-in-Docker) ==="
+  echo "=== M2/M4 acceptance gate, Block B + Block C: ALL STEPS PASSED (systemd-in-Docker) ==="
   return 0
 }
 
@@ -107,9 +119,10 @@ try_lima() {
 
   limactl shell "$instance" -- sudo bash -c "cd $REPO_ROOT && bash ci/services-checks-live.sh"
   limactl shell "$instance" -- sudo bash -c "cd $REPO_ROOT && bash ci/services-checks-migration.sh"
+  limactl shell "$instance" -- sudo bash -c "cd $REPO_ROOT && bash ci/services-checks-admin.sh"
 
   echo
-  echo "=== M2 acceptance gate, Block B: ALL STEPS PASSED (Lima) ==="
+  echo "=== M2/M4 acceptance gate, Block B + Block C: ALL STEPS PASSED (Lima) ==="
 }
 
 if try_docker_systemd; then

@@ -1,0 +1,832 @@
+#!/usr/bin/env python3
+"""cloudberryos-admin -- parent admin panel HTTP server (M4, V1 spec).
+
+Python stdlib only (http.server, json, hmac, secrets, http.cookies) --
+no pip dependencies, matching the rest of CloudberryOS. Runs as root via
+cloudberryos-admin.service. Root is acceptable for V1 *only* because
+token auth is mandatory on every request from the first commit: every
+route below either is the login page/handler or requires a valid,
+freshly-verified session -- there is no filesystem-serving path at all
+(this is a hand-rolled http.server.BaseHTTPRequestHandler with an
+explicit route table; it NEVER subclasses SimpleHTTPRequestHandler, so
+there is no directory-traversal surface). See docs/packaging-goal.md's
+"Admin panel" Locked Decision and the M4 spec for the full rationale.
+
+Binds ONLY 127.0.0.1:8766 -- never 0.0.0.0, never a configurable bind
+address. Tailnet reachability (when enabled) comes from `tailscale serve`
+reverse-proxying into this loopback port over HTTPS; this process itself
+never terminates TLS and never learns of the tailnet at all.
+
+Routes:
+  GET  /admin                    -- login form (no session) or the SPA shell
+                                     (valid session; embeds a CSRF token)
+  POST /admin                    -- login: exchange the token for a session
+                                     cookie (this is the only unauthenticated
+                                     state-changing action; nothing else is)
+  GET  /api/status                       -- profile summary + service states + last apply
+  GET  /api/resources                    -- list catalog resources
+  POST /api/resources                    -- add a resource
+  PUT  /api/resources                    -- edit an existing resource, addressed by title
+  DELETE /api/resources                  -- delete a resource, addressed by title
+  POST /api/resources/reorder            -- reorder resources by title
+  POST /api/videos                       -- add an approved YouTube video
+  POST /api/apply                        -- run /usr/sbin/cloudberryos-apply
+  GET  /api/blocked?n=100                 -- tail TCP_DENIED lines from the squid access log
+  GET  /api/export                       -- raw resources.json content
+  POST /api/import                       -- replace resources.json wholesale
+
+Every /api/* route requires a valid session (401 if missing/invalid);
+every state-changing /api/* route (POST/PUT/DELETE) additionally requires
+a CSRF token bound to that session (403 if missing/invalid), supplied via
+the `X-CSRF-Token` header or a `csrf_token` field in a JSON body.
+
+Auth model:
+  - The token lives at /etc/cloudberryos/admin-token (root:root 0600),
+    created by cloudberryos-setup. Login compares the submitted token to
+    it with hmac.compare_digest -- never `==` -- so comparison time does
+    not leak how much of the token was guessed correctly.
+  - A session is a fresh secrets.token_urlsafe(32) id, stored server-side
+    in an in-memory dict (acceptable for a stdlib V1 single-process
+    server -- sessions are lost on restart, which is fine: the parent
+    just logs in again). Each session also stores a CSRF token
+    (secrets.token_urlsafe(32)) and a hash of the admin-token's content
+    at the moment the session was created.
+  - Every authenticated request re-hashes the on-disk admin-token and
+    compares it to the session's stored hash; a mismatch (i.e. the token
+    file was rotated, via `cloudberryos-admin rotate-token` or a re-run of
+    cloudberryos-setup that regenerated it) invalidates that session on
+    the spot -- this is how rotation invalidates existing sessions without
+    any cross-process signaling.
+  - The session cookie is HttpOnly and SameSite=Strict. `Secure` is NOT
+    set unconditionally: local (loopback, plain HTTP) access must still
+    work. It IS set when the request carries `X-Forwarded-Proto: https`,
+    which is how a TLS-terminating reverse proxy (this is what `tailscale
+    serve` is) is conventionally expected to signal the original scheme
+    to its backend. This process itself never terminates TLS, so this
+    header is the only signal available to it; this is a documented
+    best-effort assumption, not independently verified against a real
+    `tailscale serve` deployment (that verification is Manual Hardware
+    Checklist territory).
+
+CLI:
+  cloudberryos-admin [serve]     -- run the server in the foreground (default;
+                                     this is what cloudberryos-admin.service execs)
+  cloudberryos-admin rotate-token -- regenerate the token file (0600) and,
+                                     by construction (see above), invalidate
+                                     every existing session
+"""
+import argparse
+import copy
+import hashlib
+import hmac
+import html
+import json
+import os
+import secrets
+import sys
+import time
+from collections import deque
+from http import cookies as http_cookies
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+_TOOLS_DIR_CANDIDATES = [
+    Path("/usr/share/cloudberryos/tools"),
+    # repo checkout: usr/bin/cloudberryos-admin -> usr/bin -> usr -> repo root
+    Path(__file__).resolve().parent.parent.parent / "tools",
+]
+for _candidate in _TOOLS_DIR_CANDIDATES:
+    if (_candidate / "cloudberryos_common.py").exists():
+        sys.path.insert(0, str(_candidate))
+        break
+else:
+    raise SystemExit("cloudberryos-admin: cannot locate cloudberryos_common.py")
+
+import cloudberryos_common as common  # noqa: E402
+
+BIND_HOST = "127.0.0.1"
+BIND_PORT = 8766
+SQUID_ACCESS_LOG = Path("/var/log/squid/cloudberryos-access.log")
+LAST_APPLY_PATH = common.VAR_DIR / "last-apply.json"
+SESSION_COOKIE_NAME = "cb_session"
+
+# In-memory session store: session_id -> {"csrf": str, "token_hash": str,
+# "created": float}. Deliberately not persisted -- see module docstring.
+SESSIONS = {}
+
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def require_root():
+    if os.geteuid() != 0:
+        eprint("cloudberryos-admin: must be run as root (use sudo).")
+        raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# Auth primitives
+# ---------------------------------------------------------------------------
+
+def _admin_token_text():
+    return common.read_text_or_none(common.ADMIN_TOKEN_PATH)
+
+
+def _token_hash():
+    token = _admin_token_text()
+    if token is None:
+        return None
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+
+
+def _check_token(supplied):
+    """Constant-time token comparison -- hmac.compare_digest, never ==."""
+    actual = _admin_token_text()
+    if actual is None or not supplied:
+        return False
+    return hmac.compare_digest(supplied.strip().encode("utf-8"), actual.strip().encode("utf-8"))
+
+
+def _create_session():
+    session_id = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(32)
+    SESSIONS[session_id] = {
+        "csrf": csrf,
+        "token_hash": _token_hash(),
+        "created": time.time(),
+    }
+    return session_id, csrf
+
+
+def _get_session_id(handler):
+    raw_cookie = handler.headers.get("Cookie")
+    if not raw_cookie:
+        return None
+    jar = http_cookies.SimpleCookie()
+    try:
+        jar.load(raw_cookie)
+    except http_cookies.CookieError:
+        return None
+    morsel = jar.get(SESSION_COOKIE_NAME)
+    return morsel.value if morsel else None
+
+
+def _validate_session(handler):
+    """Return the session dict for a valid, still-current session, else
+    None. "Still current" means: the on-disk admin-token's hash still
+    matches what it was when the session was created -- this is how
+    rotate-token invalidates every existing session without any
+    cross-process signaling."""
+    session_id = _get_session_id(handler)
+    if not session_id:
+        return None
+    session = SESSIONS.get(session_id)
+    if session is None:
+        return None
+    current_hash = _token_hash()
+    if current_hash is None or not hmac.compare_digest(session["token_hash"] or "", current_hash):
+        SESSIONS.pop(session_id, None)
+        return None
+    return session
+
+
+def _check_csrf(handler, session, body):
+    supplied = handler.headers.get("X-CSRF-Token")
+    if not supplied and isinstance(body, dict):
+        supplied = body.get("csrf_token")
+    if not supplied:
+        return False
+    return hmac.compare_digest(str(supplied).encode("utf-8"), session["csrf"].encode("utf-8"))
+
+
+def _set_session_cookie(handler, session_id):
+    # See the module docstring's Auth model note: Secure is gated on
+    # X-Forwarded-Proto: https (the signal a TLS-terminating reverse proxy
+    # such as `tailscale serve` is expected to set), never set
+    # unconditionally, because plain-HTTP loopback access must keep working.
+    proto = (handler.headers.get("X-Forwarded-Proto") or "").lower()
+    secure_attr = "; Secure" if proto == "https" else ""
+    cookie = f"{SESSION_COOKIE_NAME}={session_id}; Path=/; HttpOnly; SameSite=Strict{secure_attr}"
+    handler.send_header("Set-Cookie", cookie)
+
+
+def _clear_session_cookie(handler):
+    cookie = f"{SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+    handler.send_header("Set-Cookie", cookie)
+
+
+# ---------------------------------------------------------------------------
+# Small response helpers
+# ---------------------------------------------------------------------------
+
+def send_json(handler, status, payload, extra_headers=None):
+    body_bytes = json.dumps(payload).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(body_bytes)))
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    if extra_headers:
+        for name, value in extra_headers:
+            handler.send_header(name, value)
+    handler.end_headers()
+    handler.wfile.write(body_bytes)
+
+
+def send_html(handler, status, html_text, extra_headers=None):
+    body_bytes = html_text.encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body_bytes)))
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    if extra_headers:
+        for name, value in extra_headers:
+            handler.send_header(name, value)
+    handler.end_headers()
+    handler.wfile.write(body_bytes)
+
+
+def read_body(handler):
+    """Return the raw request body as bytes (empty bytes if none)."""
+    length = int(handler.headers.get("Content-Length") or 0)
+    if length <= 0:
+        return b""
+    return handler.rfile.read(length)
+
+
+def read_json_body(handler):
+    raw = read_body(handler)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+# ---------------------------------------------------------------------------
+# Resource catalog helpers (reuse cloudberryos-resource's load/save + validate
+# -- never duplicate that logic here).
+# ---------------------------------------------------------------------------
+
+def _resource_module():
+    return common.load_resource_module()
+
+
+def _load_catalog():
+    return _resource_module().load_config(common.RESOURCES_PATH)
+
+
+def _save_catalog(config):
+    _resource_module().save_config(common.RESOURCES_PATH, config)
+
+
+def _find_resource_index(config, title):
+    if not title:
+        return -1
+    needle = title.strip().lower()
+    for index, resource in enumerate(config.get("resources", []) or []):
+        if str(resource.get("title", "")).strip().lower() == needle:
+            return index
+    return -1
+
+
+# ---------------------------------------------------------------------------
+# Route handlers -- GET
+# ---------------------------------------------------------------------------
+
+LOGIN_PAGE_TEMPLATE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>CloudberryOS Admin</title>
+<style>
+body{{font-family:sans-serif;max-width:28rem;margin:4rem auto;padding:0 1rem;}}
+input[type=password]{{width:100%;padding:.5rem;font-size:1rem;box-sizing:border-box;}}
+button{{padding:.5rem 1rem;font-size:1rem;margin-top:.75rem;}}
+.error{{color:#a30000;}}
+</style></head>
+<body>
+<h1>CloudberryOS Admin</h1>
+<p>Enter the admin token (see <code>sudo cat /etc/cloudberryos/admin-token</code>).</p>
+{error_html}
+<form method="POST" action="/admin">
+<input type="password" name="token" placeholder="Admin token" autofocus required>
+<button type="submit">Log in</button>
+</form>
+</body></html>
+"""
+
+APP_PAGE_TEMPLATE = """<!doctype html>
+<html><head><meta charset="utf-8"><title>CloudberryOS Admin</title>
+<meta name="csrf-token" content="{csrf}">
+<style>
+body{{font-family:sans-serif;max-width:56rem;margin:2rem auto;padding:0 1rem;}}
+section{{margin-bottom:2rem;}}
+table{{border-collapse:collapse;width:100%;}}
+td,th{{border:1px solid #ccc;padding:.4rem;text-align:left;font-size:.9rem;}}
+textarea{{width:100%;box-sizing:border-box;font-family:monospace;}}
+button{{padding:.3rem .8rem;}}
+pre{{background:#f5f5f5;padding:.5rem;overflow-x:auto;}}
+</style></head>
+<body>
+<h1>CloudberryOS Admin</h1>
+<p>Child: <strong id="child-name">-</strong> &middot; Student user: <strong id="student-user">-</strong></p>
+
+<section>
+<h2>Status</h2>
+<pre id="status-out">loading...</pre>
+<button onclick="loadStatus()">Refresh</button>
+</section>
+
+<section>
+<h2>Resources</h2>
+<table id="resources-table"><thead><tr><th>Title</th><th>URL</th><th>Category</th><th></th></tr></thead><tbody></tbody></table>
+<h3>Add site</h3>
+<form id="add-form" onsubmit="return addSite(event)">
+<input name="title" placeholder="Title" required>
+<input name="url" placeholder="https://example.org/" required>
+<input name="category" placeholder="Category" value="Explore">
+<input name="summary" placeholder="Summary" required>
+<input name="allow_domains" placeholder="allowed domains, comma separated" required>
+<button type="submit">Add</button>
+</form>
+</section>
+
+<section>
+<h2>Apply</h2>
+<button onclick="runApply()">Run cloudberryos-apply</button>
+<pre id="apply-out"></pre>
+</section>
+
+<section>
+<h2>Blocked (recent TCP_DENIED)</h2>
+<button onclick="loadBlocked()">Refresh</button>
+<pre id="blocked-out"></pre>
+</section>
+
+<section>
+<h2>Export / Import</h2>
+<button onclick="doExport()">Export catalog</button>
+<pre id="export-out"></pre>
+</section>
+
+<script>
+const csrf = document.querySelector('meta[name="csrf-token"]').content;
+function jsonHeaders() {{ return {{"Content-Type": "application/json", "X-CSRF-Token": csrf}}; }}
+async function loadStatus() {{
+  const r = await fetch("/api/status");
+  const d = await r.json();
+  document.getElementById("child-name").textContent = d.child_name || "-";
+  document.getElementById("student-user").textContent = d.student_user || "-";
+  document.getElementById("status-out").textContent = JSON.stringify(d, null, 2);
+}}
+async function loadResources() {{
+  const r = await fetch("/api/resources");
+  const d = await r.json();
+  const tbody = document.querySelector("#resources-table tbody");
+  tbody.innerHTML = "";
+  (d.resources || []).forEach(res => {{
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${{res.title}}</td><td>${{res.url}}</td><td>${{res.category || ""}}</td>` +
+      `<td><button onclick="deleteSite('${{res.title}}')">Delete</button></td>`;
+    tbody.appendChild(tr);
+  }});
+}}
+async function addSite(ev) {{
+  ev.preventDefault();
+  const f = ev.target;
+  const body = {{
+    title: f.title.value, url: f.url.value, category: f.category.value,
+    summary: f.summary.value,
+    allow_domains: f.allow_domains.value.split(",").map(s => s.trim()).filter(Boolean),
+  }};
+  await fetch("/api/resources", {{method: "POST", headers: jsonHeaders(), body: JSON.stringify(body)}});
+  f.reset();
+  loadResources();
+  return false;
+}}
+async function deleteSite(title) {{
+  await fetch("/api/resources", {{method: "DELETE", headers: jsonHeaders(), body: JSON.stringify({{title}})}});
+  loadResources();
+}}
+async function runApply() {{
+  const r = await fetch("/api/apply", {{method: "POST", headers: jsonHeaders(), body: "{{}}"}});
+  const d = await r.json();
+  document.getElementById("apply-out").textContent = (d.stdout || "") + (d.stderr || "");
+}}
+async function loadBlocked() {{
+  const r = await fetch("/api/blocked?n=100");
+  const d = await r.json();
+  document.getElementById("blocked-out").textContent = (d.lines || []).join("\\n");
+}}
+async function doExport() {{
+  const r = await fetch("/api/export");
+  const d = await r.json();
+  document.getElementById("export-out").textContent = JSON.stringify(d, null, 2);
+}}
+loadStatus();
+loadResources();
+</script>
+</body></html>
+"""
+
+
+def handle_admin_page_get(handler, parsed_url):
+    session = _validate_session(handler)
+    if session is None:
+        send_html(handler, 200, LOGIN_PAGE_TEMPLATE.format(error_html=""))
+        return
+    send_html(handler, 200, APP_PAGE_TEMPLATE.format(csrf=html.escape(session["csrf"])))
+
+
+def handle_login(handler, parsed_url):
+    """POST /admin: exchange the admin token for a session cookie. This is
+    the one and only unauthenticated, state-changing action -- there is no
+    session yet to bind a CSRF token to, so none is required here (this is
+    the standard, safe pattern for a login endpoint: the credential being
+    exchanged IS the proof of authorization)."""
+    content_type = handler.headers.get("Content-Type", "")
+    raw = read_body(handler)
+    token = ""
+    if "application/x-www-form-urlencoded" in content_type:
+        form = parse_qs(raw.decode("utf-8", errors="replace"))
+        token = (form.get("token") or [""])[0]
+    else:
+        data = read_json_body(handler)
+        if isinstance(data, dict):
+            token = data.get("token", "")
+
+    if not _check_token(token):
+        send_html(handler, 401, LOGIN_PAGE_TEMPLATE.format(error_html='<p class="error">Invalid token.</p>'))
+        return
+
+    session_id, _csrf = _create_session()
+    handler.send_response(303)
+    handler.send_header("Location", "/admin")
+    _set_session_cookie(handler, session_id)
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+
+
+def _service_state(unit):
+    result = common.run(["systemctl", "is-active", unit])
+    return (result.stdout or "").strip() or "unknown"
+
+
+def _service_states(student_user):
+    if not common.systemd_available():
+        return {"note": "systemd unavailable in this environment"}
+    states = {
+        "cloudberryos-firewall.service": _service_state("cloudberryos-firewall.service"),
+        "squid.service": _service_state("squid.service"),
+        "cloudberryos-admin.service": _service_state("cloudberryos-admin.service"),
+    }
+    if student_user:
+        states[f"cloudberryos-home@{student_user}.service"] = _service_state(f"cloudberryos-home@{student_user}.service")
+    return states
+
+
+def _read_last_apply():
+    data = common.load_json(LAST_APPLY_PATH, default=None)
+    return data
+
+
+def handle_status(handler, parsed_url, session):
+    profile = common.load_profile()
+    payload = {
+        "child_name": profile.get("child_name"),
+        "student_user": profile.get("student_user"),
+        "admin_panel": profile.get("admin_panel"),
+        "apps": profile.get("apps", []),
+        "offline_wikipedia": profile.get("offline_wikipedia"),
+        "install_browser_policies": profile.get("install_browser_policies"),
+        "squid_managed": profile.get("squid_managed"),
+        "deferred_service_setup": profile.get("deferred_service_setup"),
+        "services": _service_states(profile.get("student_user")),
+        "last_apply": _read_last_apply(),
+    }
+    send_json(handler, 200, payload)
+
+
+def handle_resources_get(handler, parsed_url, session):
+    config = _load_catalog()
+    send_json(handler, 200, {"resources": config.get("resources", [])})
+
+
+def handle_blocked(handler, parsed_url, session):
+    query = parse_qs(parsed_url.query)
+    try:
+        n = int((query.get("n") or ["100"])[0])
+    except ValueError:
+        n = 100
+    n = max(1, min(n, 1000))
+    lines = []
+    if SQUID_ACCESS_LOG.exists():
+        window = deque(maxlen=n)
+        try:
+            with SQUID_ACCESS_LOG.open("r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if "DENIED" in line:
+                        window.append(line.rstrip("\n"))
+        except OSError as exc:
+            send_json(handler, 500, {"error": f"could not read squid access log: {exc}"})
+            return
+        lines = list(window)
+    send_json(handler, 200, {"lines": lines})
+
+
+def handle_export(handler, parsed_url, session):
+    if not common.RESOURCES_PATH.exists():
+        send_json(handler, 404, {"error": "no resources.json found"})
+        return
+    config = _load_catalog()
+    send_json(handler, 200, config)
+
+
+# ---------------------------------------------------------------------------
+# Route handlers -- state-changing (CSRF-checked by the dispatcher)
+# ---------------------------------------------------------------------------
+
+def handle_resources_post(handler, parsed_url, session, body):
+    if not isinstance(body, dict) or not str(body.get("title", "")).strip():
+        send_json(handler, 400, {"error": "'title' is required"})
+        return
+    config = _load_catalog()
+    if _find_resource_index(config, body["title"]) != -1:
+        send_json(handler, 409, {"error": f"resource already exists: {body['title']}"})
+        return
+    resource = {k: body[k] for k in ("title", "url", "category", "summary", "allow_domains", "search") if k in body}
+    resource.setdefault("category", "Explore")
+    config.setdefault("resources", []).append(resource)
+    errors = _resource_module().validate_config(config)
+    if errors:
+        send_json(handler, 400, {"error": "validation failed", "details": errors})
+        return
+    _save_catalog(config)
+    send_json(handler, 201, {"resource": resource})
+
+
+def handle_resources_put(handler, parsed_url, session, body):
+    """Edit an existing resource, addressed by its current title (body
+    field "title"). Any of url/category/summary/allow_domains/search
+    present in the body overwrite that field; an optional "new_title"
+    renames the resource."""
+    if not isinstance(body, dict) or not str(body.get("title", "")).strip():
+        send_json(handler, 400, {"error": "'title' is required to address the resource being edited"})
+        return
+    config = _load_catalog()
+    index = _find_resource_index(config, body["title"])
+    if index == -1:
+        send_json(handler, 404, {"error": f"no such resource: {body['title']}"})
+        return
+    resource = config["resources"][index]
+    for field in ("url", "category", "summary", "allow_domains", "search"):
+        if field in body:
+            resource[field] = body[field]
+    if str(body.get("new_title", "")).strip():
+        resource["title"] = body["new_title"].strip()
+    errors = _resource_module().validate_config(config)
+    if errors:
+        send_json(handler, 400, {"error": "validation failed", "details": errors})
+        return
+    _save_catalog(config)
+    send_json(handler, 200, {"resource": resource})
+
+
+def handle_resources_delete(handler, parsed_url, session, body):
+    if not isinstance(body, dict) or not str(body.get("title", "")).strip():
+        send_json(handler, 400, {"error": "'title' is required"})
+        return
+    config = _load_catalog()
+    index = _find_resource_index(config, body["title"])
+    if index == -1:
+        send_json(handler, 404, {"error": f"no such resource: {body['title']}"})
+        return
+    removed = config["resources"].pop(index)
+    _save_catalog(config)
+    send_json(handler, 200, {"removed": removed})
+
+
+def handle_resources_reorder(handler, parsed_url, session, body):
+    titles = body.get("titles") if isinstance(body, dict) else None
+    if not isinstance(titles, list) or not titles:
+        send_json(handler, 400, {"error": "'titles' must be a non-empty list"})
+        return
+    config = _load_catalog()
+    resources = config.get("resources", [])
+    by_title = {str(r.get("title", "")).strip().lower(): r for r in resources}
+    wanted = [str(t).strip().lower() for t in titles]
+    missing = [t for t in wanted if t not in by_title]
+    if missing:
+        send_json(handler, 400, {"error": f"unknown title(s): {missing}"})
+        return
+    ordered = [by_title[t] for t in wanted]
+    remaining = [r for r in resources if str(r.get("title", "")).strip().lower() not in wanted]
+    config["resources"] = ordered + remaining
+    _save_catalog(config)
+    send_json(handler, 200, {"resources": config["resources"]})
+
+
+def handle_videos_post(handler, parsed_url, session, body):
+    if not isinstance(body, dict) or not body.get("video"):
+        send_json(handler, 400, {"error": "'video' (URL or 11-char ID) is required"})
+        return
+    resource_module = _resource_module()
+    try:
+        youtube_id = resource_module.video_id_from(str(body["video"]))
+    except SystemExit as exc:
+        send_json(handler, 400, {"error": str(exc)})
+        return
+    config = _load_catalog()
+    videos = config.setdefault("youtube", {}).setdefault("videos", [])
+    if any(v.get("youtube_id") == youtube_id for v in videos):
+        send_json(handler, 409, {"error": f"video already exists: {youtube_id}"})
+        return
+    video = {
+        "title": body.get("title", youtube_id),
+        "youtube_id": youtube_id,
+        "category": "Watch",
+        "summary": body.get("summary", ""),
+    }
+    videos.append(video)
+    errors = resource_module.validate_config(config)
+    if errors:
+        send_json(handler, 400, {"error": "validation failed", "details": errors})
+        return
+    _save_catalog(config)
+    send_json(handler, 201, {"video": video})
+
+
+def handle_apply(handler, parsed_url, session, body):
+    result = common.run(["/usr/sbin/cloudberryos-apply"], capture_output=True)
+    payload = {"returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+    try:
+        common.VAR_DIR.mkdir(parents=True, exist_ok=True)
+        common.write_json_atomic(LAST_APPLY_PATH, {"timestamp": time.time(), "returncode": result.returncode})
+    except OSError:
+        pass
+    send_json(handler, 200 if result.returncode == 0 else 500, payload)
+
+
+def handle_import(handler, parsed_url, session, body):
+    if not isinstance(body, dict):
+        send_json(handler, 400, {"error": "request body must be a JSON object (a full resources.json catalog)"})
+        return
+    resource_module = _resource_module()
+    errors = resource_module.validate_config(body)
+    if errors:
+        send_json(handler, 400, {"error": "validation failed", "details": errors})
+        return
+    _save_catalog(copy.deepcopy(body))
+    send_json(handler, 200, {"imported": True})
+
+
+# ---------------------------------------------------------------------------
+# Route table + dispatcher
+# ---------------------------------------------------------------------------
+# Explicit route table -- no filesystem serving of any kind (never
+# SimpleHTTPRequestHandler). Everything in these tables except ("GET",
+# "/admin") and ("POST", "/admin") requires a valid session; every entry in
+# STATE_CHANGING_ROUTES additionally requires a valid CSRF token.
+
+READ_ROUTES = {
+    "/api/status": handle_status,
+    "/api/resources": handle_resources_get,
+    "/api/blocked": handle_blocked,
+    "/api/export": handle_export,
+}
+
+STATE_CHANGING_ROUTES = {
+    ("POST", "/api/resources"): handle_resources_post,
+    ("PUT", "/api/resources"): handle_resources_put,
+    ("DELETE", "/api/resources"): handle_resources_delete,
+    ("POST", "/api/resources/reorder"): handle_resources_reorder,
+    ("POST", "/api/videos"): handle_videos_post,
+    ("POST", "/api/apply"): handle_apply,
+    ("POST", "/api/import"): handle_import,
+}
+
+
+class AdminHandler(BaseHTTPRequestHandler):
+    server_version = "cloudberryos-admin/1.0"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, fmt, *args):
+        # Keep journald output reasonably quiet; still log via stderr like
+        # the stdlib default, just without embedding raw client input
+        # differently than the base implementation already does.
+        eprint("cloudberryos-admin: %s - %s" % (self.address_string(), fmt % args))
+
+    def _dispatch_read(self, method):
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
+        if path == "/admin":
+            if method == "GET":
+                return handle_admin_page_get(self, parsed_url)
+            return send_json(self, 404, {"error": "not found"})
+        handler = READ_ROUTES.get(path)
+        if handler is None:
+            return send_json(self, 404, {"error": "not found"})
+        session = _validate_session(self)
+        if session is None:
+            return send_json(self, 401, {"error": "unauthenticated"})
+        handler(self, parsed_url, session)
+
+    def _dispatch_write(self, method):
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
+        if path == "/admin" and method == "POST":
+            return handle_login(self, parsed_url)
+
+        handler = STATE_CHANGING_ROUTES.get((method, path))
+        if handler is None:
+            return send_json(self, 404, {"error": "not found"})
+
+        session = _validate_session(self)
+        if session is None:
+            return send_json(self, 401, {"error": "unauthenticated"})
+
+        body = read_json_body(self)
+        if body is None:
+            return send_json(self, 400, {"error": "request body must be valid JSON"})
+
+        if not _check_csrf(self, session, body):
+            return send_json(self, 403, {"error": "missing or invalid CSRF token"})
+
+        handler(self, parsed_url, session, body)
+
+    def do_GET(self):
+        try:
+            self._dispatch_read("GET")
+        except Exception as exc:  # noqa: BLE001 -- never leak a stack trace to the client
+            eprint(f"cloudberryos-admin: unhandled exception: {exc!r}")
+            send_json(self, 500, {"error": "internal error"})
+
+    def do_POST(self):
+        try:
+            self._dispatch_write("POST")
+        except Exception as exc:  # noqa: BLE001
+            eprint(f"cloudberryos-admin: unhandled exception: {exc!r}")
+            send_json(self, 500, {"error": "internal error"})
+
+    def do_PUT(self):
+        try:
+            self._dispatch_write("PUT")
+        except Exception as exc:  # noqa: BLE001
+            eprint(f"cloudberryos-admin: unhandled exception: {exc!r}")
+            send_json(self, 500, {"error": "internal error"})
+
+    def do_DELETE(self):
+        try:
+            self._dispatch_write("DELETE")
+        except Exception as exc:  # noqa: BLE001
+            eprint(f"cloudberryos-admin: unhandled exception: {exc!r}")
+            send_json(self, 500, {"error": "internal error"})
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def cmd_serve():
+    require_root()
+    if not common.ADMIN_TOKEN_PATH.exists():
+        eprint(
+            f"cloudberryos-admin: {common.ADMIN_TOKEN_PATH} does not exist yet -- "
+            "run 'sudo cloudberryos-setup' first (with --admin-panel local or tailnet)."
+        )
+        return 1
+    server = ThreadingHTTPServer((BIND_HOST, BIND_PORT), AdminHandler)
+    print(f"cloudberryos-admin: listening on http://{BIND_HOST}:{BIND_PORT}/admin (loopback only)")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+    return 0
+
+
+def cmd_rotate_token():
+    require_root()
+    token, _created = common.ensure_admin_token(force=True)
+    print(f"cloudberryos-admin: rotated {common.ADMIN_TOKEN_PATH} (mode 0600).")
+    print("Existing sessions in any running cloudberryos-admin process are now invalid.")
+    print(f"New token: {token}")
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="cloudberryos-admin")
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("serve", help="Run the admin HTTP server in the foreground (default)")
+    sub.add_parser("rotate-token", help="Regenerate the admin token (0600) and invalidate existing sessions")
+    args = parser.parse_args(argv)
+
+    if args.command == "rotate-token":
+        return cmd_rotate_token()
+    return cmd_serve()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -15,8 +15,10 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source "$REPO_ROOT/ci/version.sh"
+VERSION="$(cloudberryos_version "$REPO_ROOT/debian/changelog")"
 
-DEB="dist/cloudberryos_0.1.0_all.deb"
+DEB="dist/cloudberryos_${VERSION}_all.deb"
 if [[ ! -f "$DEB" ]]; then
   echo "missing $DEB -- run the build step first" >&2
   exit 1
@@ -32,7 +34,7 @@ hash_tree() {
 # ---------------------------------------------------------------------------
 # Install on a machine with NO prior /etc/cloudberryos state.
 # ---------------------------------------------------------------------------
-step "apt-get install ./dist/cloudberryos_0.1.0_all.deb (fresh, no prior state)"
+step "apt-get install ./$DEB (fresh, no prior state)"
 test ! -e /etc/cloudberryos
 apt-get install -yq --no-install-recommends "./$DEB"
 command -v cloudberryos-setup >/dev/null

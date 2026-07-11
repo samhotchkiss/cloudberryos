@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,7 @@ ALLOWED_DOMAINS_PATH = ETC_DIR / "allowed-domains.txt"
 STUDENT_USERS_PATH = ETC_DIR / "student-users"
 INSTALL_ENV_PATH = ETC_DIR / "install.env"
 INSTALL_ENV_MIGRATED_PATH = ETC_DIR / "install.env.migrated"
+ADMIN_TOKEN_PATH = ETC_DIR / "admin-token"
 
 SQUID_CONF_PATH = Path("/etc/squid/squid.conf")
 SQUID_BAK_PATH = Path("/etc/squid/squid.conf.cloudberryos.bak")
@@ -587,3 +589,119 @@ def looks_like_cloudberryos_artifact(path):
     except OSError:
         return False
     return "cloudberryos" in head.lower()
+
+
+# ---------------------------------------------------------------------------
+# Admin panel (M4): admin-token lifecycle + tailnet exposure via `tailscale
+# serve`. Shared between cloudberryos-setup (creates/enables) and
+# cloudberryos-admin (reads for auth, rotate-token for rotation).
+# ---------------------------------------------------------------------------
+
+def ensure_admin_token(force=False):
+    """Generate /etc/cloudberryos/admin-token if absent, or unconditionally
+    when force=True (rotation): secrets.token_urlsafe(32), root:root 0600
+    -- never the prototype's 0644 pattern (see the Admin panel Locked
+    Decision). Returns (token: str, created_or_rotated: bool). Sessions in
+    cloudberryos-admin are bound to a hash of the token's content taken at
+    login time, so simply replacing this file (which is all "rotation"
+    does) invalidates every existing session on its next request -- no
+    cross-process signaling needed.
+    """
+    if ADMIN_TOKEN_PATH.exists() and not force:
+        existing = read_text_or_none(ADMIN_TOKEN_PATH) or ""
+        return existing.strip(), False
+    token = secrets.token_urlsafe(32)
+    ETC_DIR.mkdir(parents=True, exist_ok=True)
+    atomic_write(ADMIN_TOKEN_PATH, token + "\n", mode=0o600)
+    try:
+        os.chown(ADMIN_TOKEN_PATH, 0, 0)
+    except (PermissionError, OSError):
+        pass  # non-root dev/test environments; the 0600 mode still holds
+    return token, True
+
+
+def tailscale_bin():
+    """Resolve the tailscale binary: CLOUDBERRYOS_TAILSCALE_BIN lets tests
+    (and admins) point this at a mock/alternate binary; otherwise
+    shutil.which. Tailscale is never a package Depends (not in the Ubuntu
+    archive) -- always detected at runtime."""
+    override = os.environ.get("CLOUDBERRYOS_TAILSCALE_BIN")
+    if override:
+        return override
+    return shutil.which("tailscale")
+
+
+def tailscale_is_up(tbin):
+    """True when `tailscale status` succeeds (tailscaled running and the
+    node is logged in) -- the "installed and up" half of the M4 default."""
+    result = run([tbin, "status"])
+    return result.returncode == 0
+
+
+def tailscale_status_json(tbin):
+    result = run([tbin, "status", "--json"])
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except (ValueError, TypeError):
+        return None
+
+
+def tailscale_check_magicdns_https(tbin, warn):
+    """Best-effort, non-fatal check that MagicDNS + HTTPS certs are
+    enabled for the tailnet before `tailscale serve` can hand out a valid
+    cert at the machine's MagicDNS name. Real end-to-end verification
+    (does a second device actually see a valid cert) is Manual-Hardware-
+    Checklist territory -- this only inspects `tailscale status --json`
+    and prints one-line guidance when the fields it looks for are
+    missing; it never blocks setup."""
+    status = tailscale_status_json(tbin)
+    if status is None:
+        warn("could not read 'tailscale status --json' to verify MagicDNS/HTTPS-cert settings -- continuing anyway")
+        return
+    magicdns_enabled = bool(status.get("MagicDNSEnabled"))
+    cert_domains = status.get("CertDomains") or []
+    if not magicdns_enabled or not cert_domains:
+        warn(
+            "MagicDNS and/or HTTPS certificates do not appear to be enabled for this tailnet -- "
+            "enable both in the Tailscale admin console (DNS settings) so the admin panel's "
+            "tailnet endpoint gets a valid HTTPS certificate at its MagicDNS name"
+        )
+
+
+def tailscale_serve_publish(tbin, port, warn):
+    """Publish 127.0.0.1:<port> to the tailnet over HTTPS via `tailscale
+    serve` (never `funnel` -- funnel is public-internet exposure and is
+    explicitly out of scope). `tailscale serve --bg PORT` is the short
+    form: it maps the tailnet HTTPS endpoint (443, at the machine's
+    MagicDNS name) to http://127.0.0.1:PORT, and --bg detaches immediately
+    instead of holding a foreground connection. Serve config lives in
+    tailscaled itself and is reapplied automatically on boot, sidestepping
+    any boot-time bind race. Returns True on success."""
+    result = run([tbin, "serve", "--bg", str(port)])
+    if result.returncode != 0:
+        warn(f"'tailscale serve --bg {port}' failed: {(result.stderr or result.stdout).strip()}")
+        return False
+    return True
+
+
+def resolve_admin_panel_mode(requested_mode, warn):
+    """Resolve the tri-state --admin-panel value, applying the M4 tailnet
+    fallback (docs/packaging-goal.md "Admin panel" Locked Decision).
+    "off"/"local" pass through unchanged without ever touching tailscale.
+    "tailnet" -- whether the parent passed --admin-panel tailnet
+    explicitly, or cloudberryos-setup defaulted to attempting it because
+    neither a flag nor a saved profile value was present -- is verified:
+    if tailscale is absent or installed-but-down, this degrades to
+    "local" with a one-line warning and never fails setup."""
+    if requested_mode != "tailnet":
+        return requested_mode
+    tbin = tailscale_bin()
+    if not tbin:
+        warn("--admin-panel tailnet requested (or defaulted), but no 'tailscale' binary was found on PATH -- falling back to 'local'")
+        return "local"
+    if not tailscale_is_up(tbin):
+        warn("--admin-panel tailnet requested (or defaulted), but 'tailscale status' failed (installed but not up/logged in) -- falling back to 'local'")
+        return "local"
+    return "tailnet"

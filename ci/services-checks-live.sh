@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # M2 acceptance gate, Block B, part 1 (docs/packaging-goal.md "M2 -- Debian
 # packaging and lifecycle", service-level checks). Runs INSIDE a booted
-# systemd container/VM with dist/cloudberryos_0.1.0_all.deb already built.
+# systemd container/VM with dist/cloudberryos_<version>_all.deb already built.
 # Destructive -- only ever run in a throwaway systemd container or VM.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+source "$REPO_ROOT/ci/version.sh"
+VERSION="$(cloudberryos_version "$REPO_ROOT/debian/changelog")"
 
-DEB="dist/cloudberryos_0.1.0_all.deb"
+DEB="dist/cloudberryos_${VERSION}_all.deb"
 test -f "$DEB" || { echo "missing $DEB -- build it first (ci/package-stage.sh)" >&2; exit 1; }
 
 step() { echo; echo "=== Block B (live) step: $1 ==="; }
@@ -21,9 +23,15 @@ for _ in $(seq 1 60); do
 done
 systemctl is-system-running || true
 
-step "apt-get install ./dist/cloudberryos_0.1.0_all.deb"
+step "apt-get install ./$DEB"
 apt-get update -q
-apt-get install -yq --no-install-recommends "./$DEB"
+# Install from a container-local copy, not straight off the /src bind mount:
+# apt's `_apt` download sandbox cannot always read a bind-mounted file (it
+# reports "Unsupported file"), and the failure is order-dependent. Copying
+# first makes this robust regardless of prior apt activity.
+LOCAL_DEB="/tmp/$(basename "$DEB")"
+cp "$DEB" "$LOCAL_DEB"
+apt-get install -yq --no-install-recommends "$LOCAL_DEB"
 
 step "non-interactive cloudberryos-setup (systemd IS available -- no deferral)"
 SETUP_LOG="$(mktemp)"

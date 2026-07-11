@@ -4,19 +4,28 @@
 # Acceptance section). Runs INSIDE a fresh ubuntu:26.04 container that has
 # already `apt-get update`d, with a directory containing three synthetic
 # .deb builds bind-mounted read-only at /work:
-#   /work/cloudberryos_0.1.0_all.deb  -- built from the real, committed source
-#   /work/cloudberryos_0.1.1_all.deb  -- throwaway upgrade-test build:
-#                                        differing starter catalog + a real
-#                                        002 migration (never committed)
-#   /work/cloudberryos_0.1.2_all.deb  -- throwaway build on top of 0.1.1:
-#                                        adds a deliberately-raising 003
-#                                        migration (never committed)
+#   /work/cloudberryos_${BASE_VERSION}_all.deb  -- built from the real, committed source
+#   /work/cloudberryos_${NEXT1_VERSION}_all.deb -- throwaway upgrade-test build:
+#                                                   differing starter catalog + a real
+#                                                   002 migration (never committed)
+#   /work/cloudberryos_${NEXT2_VERSION}_all.deb -- throwaway build on top of NEXT1:
+#                                                   adds a deliberately-raising 003
+#                                                   migration (never committed)
+# BASE_VERSION/NEXT1_VERSION/NEXT2_VERSION are passed in via the environment
+# by ci/upgrade-stage.sh (docker run -e ...) -- never hardcoded here.
 #
 # Destructive to the container's /usr, /etc, /var, /home -- never run
 # outside a throwaway container. Orchestrated by ci/upgrade-stage.sh.
 set -euo pipefail
 
-for f in /work/cloudberryos_0.1.0_all.deb /work/cloudberryos_0.1.1_all.deb /work/cloudberryos_0.1.2_all.deb; do
+: "${BASE_VERSION:?BASE_VERSION must be set (passed in by ci/upgrade-stage.sh)}"
+: "${NEXT1_VERSION:?NEXT1_VERSION must be set (passed in by ci/upgrade-stage.sh)}"
+: "${NEXT2_VERSION:?NEXT2_VERSION must be set (passed in by ci/upgrade-stage.sh)}"
+
+DEB_BASE="/work/cloudberryos_${BASE_VERSION}_all.deb"
+DEB_NEXT1="/work/cloudberryos_${NEXT1_VERSION}_all.deb"
+DEB_NEXT2="/work/cloudberryos_${NEXT2_VERSION}_all.deb"
+for f in "$DEB_BASE" "$DEB_NEXT1" "$DEB_NEXT2"; do
   test -f "$f" || { echo "missing $f -- run ci/upgrade-stage.sh's build step first" >&2; exit 1; }
 done
 
@@ -25,16 +34,19 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 sha() { sha256sum "$1" | awk '{print $1}'; }
 
 # ---------------------------------------------------------------------------
-# Install 0.1.0 (the committed source), non-interactive setup, catalog edit.
+# Install the base version (the committed source), non-interactive setup,
+# catalog edit. --admin-panel local (rather than off) so that, from M4
+# onward, admin-token exists and its preservation across the upgrade is
+# exercised by the same conditional logic below that already anticipated it.
 # ---------------------------------------------------------------------------
-step "install 0.1.0"
+step "install $BASE_VERSION"
 test ! -e /etc/cloudberryos
-apt-get install -yq --no-install-recommends /work/cloudberryos_0.1.0_all.deb
-dpkg -s cloudberryos | grep -q '^Version: 0.1.0$'
+apt-get install -yq --no-install-recommends "$DEB_BASE"
+dpkg -s cloudberryos | grep -q "^Version: ${BASE_VERSION}\$"
 
 step "non-interactive setup"
 cloudberryos-setup --non-interactive --child-name Test --student-user testkid \
-  --keep-password --no-autologin --apps none --no-offline-wikipedia --admin-panel off
+  --keep-password --no-autologin --apps none --no-offline-wikipedia --admin-panel local
 
 step "edit /etc/cloudberryos/resources.json (parent adds a marker site)"
 python3 - <<'PY'
@@ -65,7 +77,7 @@ if [[ -e /etc/cloudberryos/admin-token ]]; then
   had_admin_token=1
 else
   had_admin_token=0
-  echo "admin-token absent (expected in 0.1.x -- M4 not implemented yet)"
+  echo "admin-token absent (expected pre-M4; --admin-panel local should have created one at/after M4)"
 fi
 resources_schema_before="$(python3 -c "import json; print(json.load(open('/etc/cloudberryos/resources.json')).get('schema_version', 0))")"
 # The shipped starter catalog (config/resources.json) has no schema_version
@@ -74,12 +86,12 @@ resources_schema_before="$(python3 -c "import json; print(json.load(open('/etc/c
 [[ "$resources_schema_before" == "0" ]] || fail "expected resources.json schema_version 0 before upgrade (missing key), got $resources_schema_before"
 
 # ---------------------------------------------------------------------------
-# Upgrade to the synthesized 0.1.1: zero stdin interaction (no conffiles
-# exist under /etc at all, so no conffile prompt is even possible).
+# Upgrade to NEXT1: zero stdin interaction (no conffiles exist under /etc at
+# all, so no conffile prompt is even possible).
 # ---------------------------------------------------------------------------
-step "apt-get install 0.1.1 (upgrade) -- must complete with zero stdin interaction"
-DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends /work/cloudberryos_0.1.1_all.deb < /dev/null
-dpkg -s cloudberryos | grep -q '^Version: 0.1.1$'
+step "apt-get install $NEXT1_VERSION (upgrade) -- must complete with zero stdin interaction"
+DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends "$DEB_NEXT1" < /dev/null
+dpkg -s cloudberryos | grep -q "^Version: ${NEXT1_VERSION}\$"
 dpkg -s cloudberryos | grep -q '^Status: install ok installed$'
 
 step "assert preservation invariants across the upgrade"
@@ -120,21 +132,21 @@ echo
 echo "=== M3 direct-upgrade form: ALL STEPS PASSED ==="
 
 # ---------------------------------------------------------------------------
-# Failing-migration recovery: install 0.1.2, which ships a 003 migration
+# Failing-migration recovery: install NEXT2, which ships a 003 migration
 # that unconditionally raises. Postinst must abort non-zero with every
 # config file untouched; removing the bad migration + `dpkg --configure -a`
 # must then recover cleanly.
 # ---------------------------------------------------------------------------
-step "record pre-0.1.2-attempt hashes"
+step "record pre-NEXT2-attempt hashes"
 profile_before_bad="$(sha /etc/cloudberryos/profile.json)"
 resources_before_bad="$(sha /etc/cloudberryos/resources.json)"
 squid_before_bad="$(sha /etc/squid/squid.conf)"
 
-step "apt-get install 0.1.2 (ships a deliberately-raising 003 migration) -- must fail"
-if DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends /work/cloudberryos_0.1.2_all.deb < /dev/null; then
-  fail "installing 0.1.2 was expected to fail (raising 003 migration) but apt-get exited 0"
+step "apt-get install $NEXT2_VERSION (ships a deliberately-raising 003 migration) -- must fail"
+if DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends "$DEB_NEXT2" < /dev/null; then
+  fail "installing $NEXT2_VERSION was expected to fail (raising 003 migration) but apt-get exited 0"
 fi
-echo "apt-get install 0.1.2 failed as expected (exit non-zero)"
+echo "apt-get install $NEXT2_VERSION failed as expected (exit non-zero)"
 
 step "assert dpkg left the package half-configured, and every config file untouched"
 dpkg -s cloudberryos | grep -qE '^Status: install ok (half-configured|unpacked)$' \
@@ -150,7 +162,7 @@ step "fix: remove the bad migration, then dpkg --configure -a must recover"
 rm -f /usr/share/cloudberryos/migrations/003-failing.py
 dpkg --configure -a
 dpkg -s cloudberryos | grep -q '^Status: install ok installed$' || fail "dpkg --configure -a did not leave cloudberryos fully configured"
-dpkg -s cloudberryos | grep -q '^Version: 0.1.2$'
+dpkg -s cloudberryos | grep -q "^Version: ${NEXT2_VERSION}\$"
 echo "dpkg --configure -a recovered cleanly after removing the bad migration: OK"
 
 # Config files must still reflect the earlier, correctly-migrated state
@@ -158,7 +170,7 @@ echo "dpkg --configure -a recovered cleanly after removing the bad migration: OK
 # by a plain 'cloudberryos-apply' run).
 [[ "$(sha /etc/cloudberryos/profile.json)" == "$profile_before_bad" ]] || fail "profile.json changed during recovery"
 [[ "$(sha /etc/cloudberryos/resources.json)" == "$resources_before_bad" ]] || fail "resources.json changed during recovery"
-[[ "$(sha /etc/squid/squid.conf)" == "$squid_before_bad" ]] || fail "squid.conf changed during recovery (apply's no-op path should hold: 0.1.2 ships the same catalog/build.py as 0.1.1)"
+[[ "$(sha /etc/squid/squid.conf)" == "$squid_before_bad" ]] || fail "squid.conf changed during recovery (apply's no-op path should hold: NEXT2 ships the same catalog/build.py as NEXT1)"
 echo "post-recovery config files still byte-identical: OK"
 
 echo

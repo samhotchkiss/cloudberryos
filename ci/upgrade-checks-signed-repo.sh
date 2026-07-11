@@ -4,20 +4,27 @@
 # apt-ftparchive/throwaway-GPG-key block under "Tasks"). Runs INSIDE a
 # fresh ubuntu:26.04 container that has already `apt-get update`d, with a
 # directory bind-mounted read-only at /work containing:
-#   /work/cloudberryos_0.1.0_all.deb
-#   /work/cloudberryos_0.1.1_all.deb   (throwaway upgrade-test build)
+#   /work/cloudberryos_${BASE_VERSION}_all.deb
+#   /work/cloudberryos_${NEXT1_VERSION}_all.deb   (throwaway upgrade-test build)
+# BASE_VERSION/NEXT1_VERSION are passed in via the environment by
+# ci/upgrade-stage.sh (docker run -e ...) -- never hardcoded here.
 #
 # Reproduces the doc's exact local signed-repo commands (apt-ftparchive +
-# a throwaway `gpg --quick-generate-key`), installs 0.1.0 from it, then
-# publishes 0.1.1 to the same repo and upgrades via `apt update && apt
-# upgrade`, asserting the same preservation invariants as the direct
+# a throwaway `gpg --quick-generate-key`), installs the base version from
+# it, then publishes NEXT1 to the same repo and upgrades via `apt update &&
+# apt upgrade`, asserting the same preservation invariants as the direct
 # upgrade form.
 #
 # Destructive to the container -- never run outside a throwaway container.
 # Orchestrated by ci/upgrade-stage.sh.
 set -euo pipefail
 
-for f in /work/cloudberryos_0.1.0_all.deb /work/cloudberryos_0.1.1_all.deb; do
+: "${BASE_VERSION:?BASE_VERSION must be set (passed in by ci/upgrade-stage.sh)}"
+: "${NEXT1_VERSION:?NEXT1_VERSION must be set (passed in by ci/upgrade-stage.sh)}"
+
+DEB_BASE="/work/cloudberryos_${BASE_VERSION}_all.deb"
+DEB_NEXT1="/work/cloudberryos_${NEXT1_VERSION}_all.deb"
+for f in "$DEB_BASE" "$DEB_NEXT1"; do
   test -f "$f" || { echo "missing $f -- run ci/upgrade-stage.sh's build step first" >&2; exit 1; }
 done
 
@@ -32,9 +39,9 @@ GNUPGHOME="$(mktemp -d)"
 chmod 700 "$GNUPGHOME"
 gpg --batch --passphrase '' --quick-generate-key repo-test@cloudberryos.invalid default default never
 
-step "build the local signed repo (apt-ftparchive) with 0.1.0 only"
+step "build the local signed repo (apt-ftparchive) with $BASE_VERSION only"
 mkdir -p /srv/repo
-cp /work/cloudberryos_0.1.0_all.deb /srv/repo/
+cp "$DEB_BASE" /srv/repo/
 (
   cd /srv/repo
   apt-ftparchive packages . > Packages
@@ -48,11 +55,11 @@ apt-get update -q
 step "apt-get install cloudberryos from the signed repo"
 test ! -e /etc/cloudberryos
 apt-get install -yq --no-install-recommends cloudberryos
-dpkg -s cloudberryos | grep -q '^Version: 0.1.0$'
+dpkg -s cloudberryos | grep -q "^Version: ${BASE_VERSION}\$"
 
 step "non-interactive setup + catalog edit"
 cloudberryos-setup --non-interactive --child-name Test --student-user testkid \
-  --keep-password --no-autologin --apps none --no-offline-wikipedia --admin-panel off
+  --keep-password --no-autologin --apps none --no-offline-wikipedia --admin-panel local
 python3 - <<'PY'
 import json
 path = "/etc/cloudberryos/resources.json"
@@ -77,8 +84,8 @@ else
   had_admin_token=0
 fi
 
-step "publish 0.1.1 to the signed repo and re-sign"
-cp /work/cloudberryos_0.1.1_all.deb /srv/repo/
+step "publish $NEXT1_VERSION to the signed repo and re-sign"
+cp "$DEB_NEXT1" /srv/repo/
 (
   cd /srv/repo
   apt-ftparchive packages . > Packages
@@ -89,7 +96,7 @@ cp /work/cloudberryos_0.1.1_all.deb /srv/repo/
 step "apt update && apt upgrade -- zero stdin interaction"
 apt-get update -q
 DEBIAN_FRONTEND=noninteractive apt-get upgrade -yq < /dev/null
-dpkg -s cloudberryos | grep -q '^Version: 0.1.1$'
+dpkg -s cloudberryos | grep -q "^Version: ${NEXT1_VERSION}\$"
 dpkg -s cloudberryos | grep -q '^Status: install ok installed$'
 
 step "assert preservation invariants across the signed-repo upgrade"
