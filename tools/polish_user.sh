@@ -237,7 +237,6 @@ hide_apps=(
   org.gnome.Sysprof.desktop
   org.gnome.baobab.desktop
   org.gnome.seahorse.Application.desktop
-  org.stellarium.Stellarium.desktop
   org.remmina.Remmina.desktop
   org.remmina.Remmina-file.desktop
   remmina-gnome.desktop
@@ -274,7 +273,7 @@ if [[ "$NO_DESKTOP" -eq 0 ]]; then
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell favorite-apps "$favorites" || true
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-trash false || true
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-mounts false || true
-  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-show-apps-button false || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-show-apps-button true || true
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-running false || true
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock dash-max-icon-size 52 || true
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.ding show-home false || true
@@ -338,6 +337,7 @@ $USERJS_MARKER
 user_pref("browser.startup.homepage", "$HOME_URL");
 user_pref("browser.startup.page", 1);
 user_pref("browser.newtabpage.enabled", false);
+user_pref("browser.uiCustomization.state", "{\"placements\":{\"nav-bar\":[\"back-button\",\"forward-button\",\"stop-reload-button\",\"home-button\",\"urlbar-container\",\"downloads-button\",\"unified-extensions-button\"],\"TabsToolbar\":[\"tabbrowser-tabs\",\"new-tab-button\",\"alltabs-button\"],\"PersonalToolbar\":[\"personal-bookmarks\"]},\"currentVersion\":20}");
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.sessionstore.resume_from_crash", false);
 user_pref("browser.sessionstore.max_tabs_undo", 0);
