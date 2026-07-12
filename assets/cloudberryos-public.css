@@ -27,7 +27,8 @@ a { color: inherit; }
   background:
     linear-gradient(90deg, rgba(5, 17, 20, 0.84), rgba(5, 17, 20, 0.33) 58%, rgba(5, 17, 20, 0.08)),
     linear-gradient(0deg, rgba(5, 17, 20, 0.66), transparent 45%),
-    url("cloudberryos-wallpaper-3840.png") center / cover;
+    url("cloudberryos-wallpaper.svg") center / cover;
+  background-color: #17343a;
 }
 
 .nav {
