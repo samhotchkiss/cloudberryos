@@ -24,13 +24,15 @@
     },
     {
       "title": "Khan Academy",
-      "url": "https://www.khanacademy.org/math/early-math",
+      "url": "https://www.khanacademy.org/",
       "category": "Learn",
-      "summary": "Early math practice that builds skill without wandering.",
+      "summary": "Math, science, reading, and more — start from the Khan Academy home.",
       "allow_domains": [
         "khanacademy.org",
         "kastatic.org",
         "kasandbox.org",
+        "fonts.googleapis.com",
+        "fonts.gstatic.com",
         "ka-cs-scratchpad-audio.s3.amazonaws.com",
         "cookielaw.org",
         "onetrust.com",
