@@ -274,6 +274,39 @@ if [[ "$NO_DESKTOP" -eq 0 ]]; then
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-trash false || true
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-mounts false || true
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-show-apps-button true || true
+  sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-apps-at-top true || true
+  # Group the curated apps into activity folders in the app grid so the child
+  # gets an organized launcher instead of a flat wall of 48 icons. Desktop ids
+  # that are not installed are simply ignored by GNOME.
+  sudo -u "$STUDENT_USER" dbus-run-session -- dconf load /org/gnome/desktop/app-folders/ <<'APPFOLDERS' || true
+[/]
+folder-children=['cb-art', 'cb-music', 'cb-stories', 'cb-code', 'cb-science']
+
+[folders/cb-art]
+name='Art & Photos'
+translate=false
+apps=['tuxpaint.desktop', 'gimp.desktop', 'org.kde.krita.desktop', 'org.inkscape.Inkscape.desktop', 'org.gnome.Shotwell.desktop', 'simple-scan.desktop']
+
+[folders/cb-music]
+name='Music & Beats'
+translate=false
+apps=['org.hydrogenmusic.Hydrogen.desktop', 'lmms.desktop', 'audacity.desktop', 'org.mixxx.Mixxx.desktop', 'sonic-pi.desktop', 'ardour.desktop', 'mscore.desktop', 'com.rosegardenmusic.rosegarden.desktop', 'carla.desktop', 'org.rncbc.drumkv1.desktop', 'org.rncbc.samplv1.desktop', 'org.rncbc.synthv1.desktop']
+
+[folders/cb-stories]
+name='Stories & Film'
+translate=false
+apps=['libreoffice-writer.desktop', 'org.pencil2d.Pencil2D.desktop', 'stopmotion.desktop', 'org.kde.kdenlive.desktop', 'scribus.desktop', 'org.openshot.OpenShot.desktop', 'com.obsproject.Studio.desktop', 'calibre-gui.desktop', 'com.github.johnfactotum.Foliate.desktop']
+
+[folders/cb-code]
+name='Code & Making'
+translate=false
+apps=['org.kde.kturtle.desktop', 'org.thonny.Thonny.desktop', 'org.godotengine.Godot3.desktop', 'arduino.desktop', 'openscad.desktop', 'org.fritzing.Fritzing.desktop', 'PrusaSlicer.desktop', 'blender.desktop']
+
+[folders/cb-science]
+name='Science & World'
+translate=false
+apps=['org.kiwix.desktop.desktop', 'org.kde.gcompris.desktop', 'org.kde.marble.desktop', 'org.kde.kstars.desktop', 'org.kde.kalzium.desktop', 'org.stellarium.Stellarium.desktop', 'org.kde.step.desktop', 'org.openchemistry.Avogadro2.desktop', 'org.kde.kgeography.desktop', 'org.kde.kig.desktop', 'tuxmath.desktop', 'tuxtype.desktop']
+APPFOLDERS
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock show-running false || true
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.dash-to-dock dash-max-icon-size 52 || true
   sudo -u "$STUDENT_USER" dbus-run-session -- gsettings set org.gnome.shell.extensions.ding show-home false || true
