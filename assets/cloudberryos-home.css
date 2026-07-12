@@ -40,7 +40,7 @@ main {
   background:
     linear-gradient(90deg, rgba(7, 19, 22, 0.82) 0%, rgba(7, 19, 22, 0.45) 47%, rgba(7, 19, 22, 0.06) 76%),
     linear-gradient(0deg, rgba(7, 19, 22, 0.64) 0%, transparent 45%),
-    url("cloudberryos-wallpaper-3840.png") center / cover;
+    url("cloudberryos-wallpaper-3840.webp") center / cover;
   box-shadow: none;
   isolation: isolate;
 }
